@@ -39,6 +39,7 @@ def main() -> None:
     data = pd.read_csv(args.dataset_path)
     output_dir = args.output_dir or args.dataset_path.parent / "models"
     output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_manifest = load_dataset_manifest(args.dataset_path)
 
     feature_sets = build_feature_sets(data)
     train = data[data["split"] == "train"].copy()
@@ -94,9 +95,16 @@ def main() -> None:
     coefficients_df.to_csv(output_dir / "part2_coefficients.csv", index=False)
     skipped_df.to_csv(output_dir / "part2_skipped_models.csv", index=False)
 
-    summary = summarize_results(results_df, skipped_df)
+    summary = summarize_results(results_df, skipped_df, args.dataset_path, dataset_manifest)
     (output_dir / "part2_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
+
+
+def load_dataset_manifest(dataset_path: Path) -> dict[str, object]:
+    manifest_path = dataset_path.parent / "part2_dataset_manifest.json"
+    if not manifest_path.exists():
+        return {}
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
 def build_feature_sets(data: pd.DataFrame) -> dict[str, list[str]]:
@@ -118,11 +126,11 @@ def build_feature_sets(data: pd.DataFrame) -> dict[str, list[str]]:
         "majority": ["constant_1"],
         "item_question_only": item + question,
         "text_only": question + text,
-        "mf_like_behavior": question + text + profile,
-        "mb_like_predicted_gaze": question + text + gaze_actual,
+        "text_plus_profile": question + text + profile,
+        "text_plus_predicted_gaze": question + text + gaze_actual,
         "mean_gaze": question + text + gaze_mean,
         "shuffled_gaze": question + text + gaze_shuffled,
-        "arbitration_profile_x_gaze": question + text + profile + gaze_actual + interactions,
+        "profile_x_predicted_gaze": question + text + profile + gaze_actual + interactions,
         "item_question_plus_profile": item + question + profile,
         "item_question_plus_predicted_gaze": item + question + gaze_actual,
         "item_question_plus_mean_gaze": item + question + gaze_mean,
@@ -183,10 +191,10 @@ def has_required_signal(model_name: str, train: pd.DataFrame) -> bool:
 
 def required_signal_prefix(model_name: str) -> str | None:
     requirements = {
-        "mb_like_predicted_gaze": "gaze_actual_",
+        "text_plus_predicted_gaze": "gaze_actual_",
         "mean_gaze": "gaze_mean_",
         "shuffled_gaze": "gaze_shuffled_",
-        "arbitration_profile_x_gaze": "gaze_actual_",
+        "profile_x_predicted_gaze": "gaze_actual_",
         "item_question_plus_predicted_gaze": "gaze_actual_",
         "item_question_plus_mean_gaze": "gaze_mean_",
         "item_question_plus_shuffled_gaze": "gaze_shuffled_",
@@ -250,12 +258,21 @@ def extract_coefficients(model, model_name: str, features: list[str]) -> list[di
     return rows
 
 
-def summarize_results(results: pd.DataFrame, skipped: pd.DataFrame) -> dict[str, object]:
+def summarize_results(
+    results: pd.DataFrame,
+    skipped: pd.DataFrame,
+    dataset_path: Path,
+    dataset_manifest: dict[str, object],
+) -> dict[str, object]:
     report = {
         "metrics_path": "part2_metrics.csv",
         "predictions_path": "part2_predictions.csv",
         "coefficients_path": "part2_coefficients.csv",
         "skipped_models_path": "part2_skipped_models.csv",
+        "dataset_path": str(dataset_path),
+        "dataset_manifest_path": str(dataset_path.parent / "part2_dataset_manifest.json") if dataset_manifest else None,
+        "gaze_feature_space": dataset_manifest.get("gaze_feature_space"),
+        "uses_residual_gaze": dataset_manifest.get("uses_residual_gaze"),
         "test_metrics": {},
         "main_comparisons": {},
         "skipped_models": skipped.to_dict(orient="records") if not skipped.empty else [],
@@ -275,16 +292,16 @@ def compare_models(test: pd.DataFrame, metric: str) -> dict[str, float]:
     values = {row["model"]: float(row[metric]) for _, row in test.iterrows() if not pd.isna(row[metric])}
     comparisons = {}
     pairs = [
-        ("mb_like_predicted_gaze", "mf_like_behavior"),
-        ("mb_like_predicted_gaze", "text_only"),
+        ("text_plus_predicted_gaze", "text_plus_profile"),
+        ("text_plus_predicted_gaze", "text_only"),
+        ("text_plus_predicted_gaze", "mean_gaze"),
+        ("text_plus_predicted_gaze", "shuffled_gaze"),
         ("item_question_plus_predicted_gaze", "item_question_only"),
         ("item_question_plus_predicted_gaze", "item_question_plus_mean_gaze"),
         ("item_question_plus_predicted_gaze", "item_question_plus_shuffled_gaze"),
         ("item_question_plus_predicted_gaze", "item_question_plus_profile"),
-        ("arbitration_profile_x_gaze", "mb_like_predicted_gaze"),
-        ("arbitration_profile_x_gaze", "mf_like_behavior"),
-        ("mb_like_predicted_gaze", "mean_gaze"),
-        ("mb_like_predicted_gaze", "shuffled_gaze"),
+        ("profile_x_predicted_gaze", "text_plus_predicted_gaze"),
+        ("profile_x_predicted_gaze", "text_plus_profile"),
     ]
     for left, right in pairs:
         if left in values and right in values:

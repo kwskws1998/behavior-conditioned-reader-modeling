@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--question-column", type=str, default="")
     parser.add_argument("--question-materials-path", type=Path, default=None)
     parser.add_argument("--text-materials-path", type=Path, default=None)
+    parser.add_argument("--gaze-feature-space", choices=["auto", "raw", "residual", "both"], default="auto")
     parser.add_argument("--profile-trials", type=str, default="")
     parser.add_argument("--positive-threshold", type=float, default=0.5)
     return parser.parse_args()
@@ -87,7 +88,7 @@ def main() -> None:
     text_features = build_text_features(data, question_col=question_col if question_col in data.columns else "")
     profile_features = build_profile_features(data, summary=summary, profile_trials=profile_trials)
     split_features = build_split_features(summary)
-    gaze_features = build_gaze_features(args.part1_run_dir)
+    gaze_features, gaze_summary = build_gaze_features(args.part1_run_dir, feature_space=args.gaze_feature_space)
 
     dataset = labels.merge(text_features, on=["reader_id", "trial_id"], how="left")
     material_features = build_material_features(
@@ -135,6 +136,7 @@ def main() -> None:
                 if col.startswith("gaze_")
             }
         ),
+        **gaze_summary,
     }
     (output_path.parent / "part2_dataset_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(json.dumps(manifest, indent=2))
@@ -476,26 +478,66 @@ def build_split_features(summary: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_gaze_features(run_dir: Path) -> pd.DataFrame:
+def build_gaze_features(run_dir: Path, feature_space: str) -> tuple[pd.DataFrame, dict[str, object]]:
     predictions_dir = run_dir / "predictions"
     if not predictions_dir.exists():
         raise FileNotFoundError(f"Missing predictions directory: {predictions_dir}")
+    prediction_files = sorted(predictions_dir.glob("*_predictions.csv"))
+    if not prediction_files:
+        raise FileNotFoundError(f"No prediction CSV files found under {predictions_dir}")
+
+    has_residual = any(prediction_file_has_column(path, "pred_residual_log_trt") for path in prediction_files)
+    if feature_space == "auto":
+        selected_spaces = ["residual"] if has_residual else ["raw"]
+        effective_space = selected_spaces[0]
+    elif feature_space == "both":
+        if not has_residual:
+            raise ValueError("--gaze-feature-space both requires residual prediction columns")
+        selected_spaces = ["raw", "residual"]
+        effective_space = "both"
+    elif feature_space == "residual":
+        if not has_residual:
+            raise ValueError("--gaze-feature-space residual requires pred_residual_log_trt columns")
+        selected_spaces = ["residual"]
+        effective_space = "residual"
+    else:
+        selected_spaces = ["raw"]
+        effective_space = "raw"
+
     frames = []
-    for path in sorted(predictions_dir.glob("*_predictions.csv")):
+    n_residual_prediction_rows = 0
+    for path in prediction_files:
         split, profile_mode = parse_prediction_name(path.name)
         if split not in {"train", "dev", "test"}:
             continue
-        frame = summarize_prediction_file(path, split=split, profile_mode=profile_mode)
-        frames.append(frame)
+        for space in selected_spaces:
+            frame, residual_rows = summarize_prediction_file(
+                path,
+                split=split,
+                profile_mode=profile_mode,
+                feature_space=space,
+            )
+            n_residual_prediction_rows += residual_rows
+            frames.append(frame)
     if not frames:
-        raise FileNotFoundError(f"No prediction CSV files found under {predictions_dir}")
+        raise FileNotFoundError(f"No usable prediction CSV files found under {predictions_dir}")
     merged = None
     for frame in frames:
         if merged is None:
             merged = frame
         else:
             merged = merged.merge(frame, on=["split", "reader_id", "trial_id"], how="outer")
-    return merged
+    summary = {
+        "requested_gaze_feature_space": feature_space,
+        "gaze_feature_space": effective_space,
+        "uses_residual_gaze": bool("residual" in selected_spaces),
+        "n_residual_prediction_rows": int(n_residual_prediction_rows),
+    }
+    return merged, summary
+
+
+def prediction_file_has_column(path: Path, column: str) -> bool:
+    return column in pd.read_csv(path, nrows=0).columns
 
 
 def parse_prediction_name(name: str) -> tuple[str, str]:
@@ -506,12 +548,23 @@ def parse_prediction_name(name: str) -> tuple[str, str]:
     return split, profile_mode
 
 
-def summarize_prediction_file(path: Path, split: str, profile_mode: str) -> pd.DataFrame:
+def summarize_prediction_file(path: Path, split: str, profile_mode: str, feature_space: str) -> tuple[pd.DataFrame, int]:
     data = pd.read_csv(path)
     rows = []
-    prefix = f"gaze_{profile_mode}"
+    if feature_space == "residual":
+        if "pred_residual_log_trt" not in data.columns:
+            raise ValueError(f"Residual prediction column missing from {path}")
+        value_col = "pred_residual_log_trt"
+        error_col = "residual_abs_error"
+        prefix = f"gaze_{profile_mode}_residual"
+        residual_rows = int(len(data))
+    else:
+        value_col = "pred_log_trt"
+        error_col = "abs_error"
+        prefix = f"gaze_{profile_mode}"
+        residual_rows = 0
     for (reader, trial), group in data.groupby(["reader_id", "trial_id"], sort=True):
-        pred = group["pred_log_trt"].to_numpy(dtype=float)
+        pred = group[value_col].to_numpy(dtype=float)
         row = {
             "split": split,
             "reader_id": str(reader),
@@ -523,10 +576,10 @@ def summarize_prediction_file(path: Path, split: str, profile_mode: str) -> pd.D
             f"{prefix}_p90": float(np.quantile(pred, 0.90)),
             f"{prefix}_top10_mean": float(np.mean(pred[pred >= np.quantile(pred, 0.90)])),
         }
-        if "abs_error" in group.columns:
-            row[f"{prefix}_mae_observed_only"] = float(group["abs_error"].mean())
+        if error_col in group.columns:
+            row[f"{prefix}_mae_observed_only"] = float(group[error_col].mean())
         rows.append(row)
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows), residual_rows
 
 
 if __name__ == "__main__":

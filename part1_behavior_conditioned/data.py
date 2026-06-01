@@ -34,6 +34,8 @@ REQUIRED_COLUMNS = [
     "lang",
 ]
 
+BASELINE_KEY_COLUMNS = ["uniform_id", "trialid", "sentnum", "wordnum"]
+
 
 @dataclass(frozen=True)
 class ReaderSplit:
@@ -84,6 +86,74 @@ def load_meco_rda(path: str | Path, lang: str = "en") -> pd.DataFrame:
         if col in data.columns:
             data[col] = pd.to_numeric(data[col], errors="coerce").fillna(0.0)
     return data.sort_values(["uniform_id", "trialid", "sentnum", "wordnum"]).reset_index(drop=True)
+
+
+def ensure_log_trt_column(data: pd.DataFrame) -> pd.DataFrame:
+    data = data.copy()
+    data["log_trt"] = [
+        None if pd.isna(value) else float(np.log1p(value))
+        for value in pd.to_numeric(data["dur"], errors="coerce")
+    ]
+    return data
+
+
+def load_residual_baseline_predictions(path: str | Path) -> pd.DataFrame:
+    predictions_dir = Path(path)
+    if (predictions_dir / "predictions").exists():
+        predictions_dir = predictions_dir / "predictions"
+    if not predictions_dir.exists():
+        raise FileNotFoundError(f"Residual baseline predictions directory not found: {predictions_dir}")
+
+    all_files = sorted(predictions_dir.glob("*_predictions.csv"))
+    actual_files = [file for file in all_files if file.name.endswith("_actual_predictions.csv")]
+    selected_files = actual_files if actual_files else all_files
+    if not selected_files:
+        raise FileNotFoundError(f"No baseline prediction CSV files found under {predictions_dir}")
+
+    frames = []
+    required = {"reader_id", "trial_id", "sent_num", "word_num", "true_log_trt", "pred_log_trt"}
+    for file in selected_files:
+        frame = pd.read_csv(file)
+        missing = required.difference(frame.columns)
+        if missing:
+            raise ValueError(f"Baseline prediction file {file} is missing columns: {sorted(missing)}")
+        frame = frame.rename(
+            columns={
+                "reader_id": "uniform_id",
+                "trial_id": "trialid",
+                "sent_num": "sentnum",
+                "word_num": "wordnum",
+                "true_log_trt": "baseline_true_log_trt",
+                "pred_log_trt": "baseline_pred_log_trt",
+            }
+        )
+        frames.append(frame[[*BASELINE_KEY_COLUMNS, "baseline_true_log_trt", "baseline_pred_log_trt"]])
+
+    baseline = pd.concat(frames, ignore_index=True)
+    baseline["uniform_id"] = baseline["uniform_id"].astype(str)
+    for col in ["trialid", "sentnum", "wordnum"]:
+        baseline[col] = pd.to_numeric(baseline[col], errors="coerce").astype("Int64")
+    baseline["baseline_true_log_trt"] = pd.to_numeric(baseline["baseline_true_log_trt"], errors="coerce")
+    baseline["baseline_pred_log_trt"] = pd.to_numeric(baseline["baseline_pred_log_trt"], errors="coerce")
+    baseline = baseline.dropna(subset=BASELINE_KEY_COLUMNS + ["baseline_pred_log_trt"]).copy()
+    for col in ["trialid", "sentnum", "wordnum"]:
+        baseline[col] = baseline[col].astype(int)
+
+    duplicated = baseline.duplicated(BASELINE_KEY_COLUMNS, keep=False)
+    if duplicated.any():
+        examples = baseline.loc[duplicated, BASELINE_KEY_COLUMNS].head(10).to_dict(orient="records")
+        raise ValueError(
+            "Residual baseline predictions contain duplicated "
+            f"(reader_id, trial_id, sent_num, word_num) rows. Examples: {examples}"
+        )
+    return baseline.sort_values(BASELINE_KEY_COLUMNS).reset_index(drop=True)
+
+
+def attach_residual_baseline(data: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
+    data = ensure_log_trt_column(data)
+    merged = data.merge(baseline, on=BASELINE_KEY_COLUMNS, how="left", validate="many_to_one")
+    merged["residual_log_trt"] = merged["log_trt"] - merged["baseline_pred_log_trt"]
+    return merged
 
 
 def make_reader_split(
@@ -148,6 +218,7 @@ def make_sentence_examples(
     trials: Iterable[int],
     profiles: dict[str, np.ndarray],
     profile_mode: str,
+    label_column: str = "log_trt",
     seed: int = 13,
 ) -> list[dict[str, Any]]:
     readers = sorted(str(reader) for reader in readers)
@@ -163,18 +234,27 @@ def make_sentence_examples(
         sentence = sentence.sort_values("wordnum")
         words = sentence["word"].astype(str).tolist()
         word_nums = sentence["wordnum"].astype(int).tolist()
-        labels = _make_log_trt_labels(sentence["dur"])
-        examples.append(
-            {
-                "tokens": words,
-                "word_nums": word_nums,
-                "labels": labels,
-                "reader_profile": profile_lookup[str(reader)].astype(float).tolist(),
-                "reader_id": str(reader),
-                "trial_id": int(trial_id),
-                "sent_num": int(sent_num),
-            }
-        )
+        if label_column not in sentence.columns:
+            if label_column == "log_trt":
+                labels = _make_log_trt_labels(sentence["dur"])
+            else:
+                raise ValueError(f"Missing label column: {label_column}")
+        else:
+            labels = _make_numeric_labels(sentence[label_column])
+        example = {
+            "tokens": words,
+            "word_nums": word_nums,
+            "labels": labels,
+            "reader_profile": profile_lookup[str(reader)].astype(float).tolist(),
+            "reader_id": str(reader),
+            "trial_id": int(trial_id),
+            "sent_num": int(sent_num),
+        }
+        if "log_trt" in sentence.columns:
+            example["raw_log_trt"] = _make_numeric_labels(sentence["log_trt"])
+        if "baseline_pred_log_trt" in sentence.columns:
+            example["baseline_log_trt"] = _make_numeric_labels(sentence["baseline_pred_log_trt"])
+        examples.append(example)
     return examples
 
 
@@ -215,7 +295,10 @@ def build_part1_raw_datasets(
     test_reader_frac: float,
     seed: int,
     explicit_test_readers: Iterable[str] | None = None,
+    label_column: str = "log_trt",
 ) -> Part1RawDatasets:
+    if label_column == "log_trt" and "log_trt" not in data.columns:
+        data = ensure_log_trt_column(data)
     split = make_reader_split(
         data["uniform_id"].unique(),
         test_reader_frac=test_reader_frac,
@@ -232,6 +315,7 @@ def build_part1_raw_datasets(
         trials=train_trials,
         profiles=profiles,
         profile_mode="actual",
+        label_column=label_column,
         seed=seed,
     )
     train = Dataset.from_list(train_examples)
@@ -246,6 +330,7 @@ def build_part1_raw_datasets(
                 trials=dev_trials,
                 profiles=profiles,
                 profile_mode=mode,
+                label_column=label_column,
                 seed=seed,
             )
         )
@@ -256,6 +341,7 @@ def build_part1_raw_datasets(
                 trials=dev_trials,
                 profiles=profiles,
                 profile_mode=mode,
+                label_column=label_column,
                 seed=seed,
             )
         )
@@ -263,9 +349,13 @@ def build_part1_raw_datasets(
 
 
 def _make_log_trt_labels(duration_ms: pd.Series) -> list[float | None]:
+    return _make_numeric_labels(pd.Series(np.log1p(pd.to_numeric(duration_ms, errors="coerce"))))
+
+
+def _make_numeric_labels(values: pd.Series) -> list[float | None]:
     labels: list[float | None] = []
-    for value in pd.to_numeric(duration_ms, errors="coerce"):
-        labels.append(None if pd.isna(value) else float(np.log1p(value)))
+    for value in pd.to_numeric(values, errors="coerce"):
+        labels.append(None if pd.isna(value) or not np.isfinite(value) else float(value))
     return labels
 
 

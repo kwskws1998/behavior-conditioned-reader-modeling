@@ -72,6 +72,7 @@ def main() -> None:
     data = pd.read_csv(args.dataset_path)
     if "text" not in data.columns:
         raise ValueError("Part 2 dataset must contain a text column. Rebuild it with build_part2_comprehension_dataset.py.")
+    dataset_manifest = load_dataset_manifest(args.dataset_path)
     output_dir = args.output_dir or args.dataset_path.parent / "original_lm_models"
     output_dir.mkdir(parents=True, exist_ok=True)
     variants = expand_variants(args.variants)
@@ -90,9 +91,16 @@ def main() -> None:
     predictions_df = pd.concat(all_predictions, ignore_index=True) if all_predictions else pd.DataFrame()
     metrics_df.to_csv(output_dir / "part2_original_lm_metrics.csv", index=False)
     predictions_df.to_csv(output_dir / "part2_original_lm_predictions.csv", index=False)
-    report = summarize_report(metrics_df)
+    report = summarize_report(metrics_df, args.dataset_path, dataset_manifest)
     (output_dir / "part2_original_lm_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
+
+
+def load_dataset_manifest(dataset_path: Path) -> dict[str, object]:
+    manifest_path = dataset_path.parent / "part2_dataset_manifest.json"
+    if not manifest_path.exists():
+        return {}
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
 def train_variant(
@@ -138,14 +146,44 @@ def train_variant(
     trainer.save_model(str(run_dir / "best_model"))
     tokenizer.save_pretrained(str(run_dir / "best_model"))
 
-    metrics = []
-    predictions = []
+    split_outputs = []
     for split_name, split_data, split_dataset in [("train", train, train_dataset), ("dev", dev, dev_dataset), ("test", test, test_dataset)]:
         if split_dataset is None or split_data.empty:
             continue
         output = trainer.predict(split_dataset, metric_key_prefix=split_name)
-        metrics.append(format_metrics(variant, split_name, output.metrics, len(feature_cols), len(split_data)))
-        predictions.append(make_prediction_frame(variant, split_name, split_data, output.predictions, args.target_column))
+        split_outputs.append((split_name, split_data, output))
+
+    dev_record = next((record for record in split_outputs if record[0] == "dev"), None)
+    tuned_threshold = 0.5
+    if dev_record is not None:
+        _, dev_data, dev_output = dev_record
+        tuned_threshold = select_balanced_accuracy_threshold(
+            dev_data[args.target_column].astype(int).to_numpy(),
+            probabilities_from_logits(dev_output.predictions),
+        )
+
+    metrics = []
+    predictions = []
+    for split_name, split_data, output in split_outputs:
+        row = format_metrics(variant, split_name, output.metrics, len(feature_cols), len(split_data))
+        tuned = compute_threshold_metrics(
+            split_data[args.target_column].astype(int).to_numpy(),
+            probabilities_from_logits(output.predictions),
+            threshold=tuned_threshold,
+        )
+        row["dev_tuned_threshold"] = float(tuned_threshold)
+        row.update({f"tuned_{key}": value for key, value in tuned.items()})
+        metrics.append(row)
+        predictions.append(
+            make_prediction_frame(
+                variant,
+                split_name,
+                split_data,
+                output.predictions,
+                args.target_column,
+                tuned_threshold=tuned_threshold,
+            )
+        )
 
     (run_dir / "feature_columns.json").write_text(json.dumps(feature_cols, indent=2), encoding="utf-8")
     (run_dir / "feature_stats.json").write_text(json.dumps(feature_stats, indent=2), encoding="utf-8")
@@ -232,7 +270,7 @@ def compute_classification_metrics(eval_pred) -> dict[str, float]:
     logits, labels = eval_pred
     logits = np.asarray(logits).reshape(-1)
     labels = np.asarray(labels).astype(int).reshape(-1)
-    probabilities = sigmoid(logits)
+    probabilities = probabilities_from_logits(logits)
     predictions = (probabilities >= 0.5).astype(int)
     metrics = {
         "accuracy": float(accuracy_score(labels, predictions)),
@@ -272,14 +310,17 @@ def make_prediction_frame(
     data: pd.DataFrame,
     logits: np.ndarray,
     target_column: str,
+    tuned_threshold: float = 0.5,
 ) -> pd.DataFrame:
-    probabilities = sigmoid(np.asarray(logits).reshape(-1))
+    probabilities = probabilities_from_logits(logits)
     keep_cols = [col for col in ["reader_id", "trial_id", "question_id", "split", "text", target_column] if col in data.columns]
     frame = data[keep_cols].copy()
     frame["variant"] = variant
     frame["eval_split"] = split
     frame["prob_correct"] = probabilities
     frame["pred_correct"] = (probabilities >= 0.5).astype(int)
+    frame["pred_correct_dev_tuned"] = (probabilities >= tuned_threshold).astype(int)
+    frame["dev_tuned_threshold"] = float(tuned_threshold)
     return frame
 
 
@@ -316,21 +357,81 @@ def sigmoid(values: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-values))
 
 
-def summarize_report(metrics: pd.DataFrame) -> dict[str, object]:
+def probabilities_from_logits(logits: np.ndarray) -> np.ndarray:
+    return sigmoid(np.asarray(logits).reshape(-1))
+
+
+def select_balanced_accuracy_threshold(labels: np.ndarray, probabilities: np.ndarray) -> float:
+    labels = np.asarray(labels).astype(int)
+    probabilities = np.asarray(probabilities, dtype=float)
+    if len(np.unique(labels)) < 2:
+        return 0.5
+    candidates = np.unique(np.concatenate(([0.0, 0.5, 1.0], probabilities)))
+    best_threshold = 0.5
+    best_score = -np.inf
+    for threshold in candidates:
+        predictions = (probabilities >= threshold).astype(int)
+        score = balanced_accuracy_score(labels, predictions)
+        if score > best_score:
+            best_score = score
+            best_threshold = float(threshold)
+    return best_threshold
+
+
+def compute_threshold_metrics(labels: np.ndarray, probabilities: np.ndarray, threshold: float) -> dict[str, float]:
+    labels = np.asarray(labels).astype(int)
+    probabilities = np.asarray(probabilities, dtype=float)
+    predictions = (probabilities >= threshold).astype(int)
+    metrics = {
+        "accuracy": float(accuracy_score(labels, predictions)),
+        "balanced_accuracy": float(balanced_accuracy_score(labels, predictions)),
+    }
+    if len(np.unique(labels)) > 1:
+        metrics["auroc"] = float(roc_auc_score(labels, probabilities))
+        metrics["average_precision"] = float(average_precision_score(labels, probabilities))
+    else:
+        metrics["auroc"] = 0.5
+        metrics["average_precision"] = float(labels.mean())
+    return metrics
+
+
+def summarize_report(metrics: pd.DataFrame, dataset_path: Path, dataset_manifest: dict[str, object]) -> dict[str, object]:
     test = metrics[metrics["split"] == "test"].copy()
     report = {
         "metrics_path": "part2_original_lm_metrics.csv",
         "predictions_path": "part2_original_lm_predictions.csv",
+        "dataset_path": str(dataset_path),
+        "dataset_manifest_path": str(dataset_path.parent / "part2_dataset_manifest.json") if dataset_manifest else None,
+        "gaze_feature_space": dataset_manifest.get("gaze_feature_space"),
+        "uses_residual_gaze": dataset_manifest.get("uses_residual_gaze"),
         "test_metrics": {},
         "main_comparisons": {},
     }
     for _, row in test.iterrows():
         report["test_metrics"][row["variant"]] = {
             key: float(row[key])
-            for key in ["n", "accuracy", "balanced_accuracy", "auroc", "average_precision", "brier", "log_loss"]
+            for key in [
+                "n",
+                "accuracy",
+                "balanced_accuracy",
+                "auroc",
+                "average_precision",
+                "brier",
+                "log_loss",
+                "dev_tuned_threshold",
+                "tuned_accuracy",
+                "tuned_balanced_accuracy",
+                "tuned_auroc",
+                "tuned_average_precision",
+            ]
             if key in row and pd.notna(row[key])
         }
     values = {row["variant"]: float(row["balanced_accuracy"]) for _, row in test.iterrows() if "balanced_accuracy" in row and pd.notna(row["balanced_accuracy"])}
+    tuned_values = {
+        row["variant"]: float(row["tuned_balanced_accuracy"])
+        for _, row in test.iterrows()
+        if "tuned_balanced_accuracy" in row and pd.notna(row["tuned_balanced_accuracy"])
+    }
     pairs = [
         ("text_plus_personalized_gaze", "text_only"),
         ("text_plus_personalized_gaze", "text_plus_profile"),
@@ -341,6 +442,10 @@ def summarize_report(metrics: pd.DataFrame) -> dict[str, object]:
     for left, right in pairs:
         if left in values and right in values:
             report["main_comparisons"][f"{left}_minus_{right}_balanced_accuracy"] = values[left] - values[right]
+        if left in tuned_values and right in tuned_values:
+            report["main_comparisons"][f"{left}_minus_{right}_tuned_balanced_accuracy"] = (
+                tuned_values[left] - tuned_values[right]
+            )
     return report
 
 

@@ -1,11 +1,12 @@
 # Behavior-Conditioned Reader Modeling
 
-This repository trains Part 1 of the project:
+This repository trains Part 1 of the project, with raw TRT prediction kept as the baseline
+and reader-specific residual TRT prediction as the main personalization route:
 
 ```text
 reader calibration behavior profile z_r + passage text
 -> behavior-conditioned XLM-RoBERTa
--> word-level log1p(TRT) prediction
+-> word-level log1p(TRT) or residual log1p(TRT) prediction
 ```
 
 The goal is to test whether a short behavior-only reader profile can personalize gaze prediction without using continuous gaze features as input.
@@ -93,6 +94,48 @@ python scripts/run_part1_multiseed.py \
   --seeds 13 21 42 \
   --epochs 5 \
   --batch-size 8
+```
+
+## Residual Part 1 Runs
+
+The residual route trains a seed-matched text-only raw baseline first, dumps its word-level
+predictions, and then trains behavior-conditioned models on:
+
+```text
+residual_log_trt = true_log_trt - text_only_pred_log_trt
+```
+
+Smoke run:
+
+```bash
+python scripts/run_part1_residual_multiseed.py \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --output-root artifacts/residual_multiseed_smoke \
+  --conditioning-types concat moe \
+  --seeds 13 \
+  --epochs 1 \
+  --max-steps 20 \
+  --batch-size 8
+```
+
+Full run:
+
+```bash
+python scripts/run_part1_residual_multiseed.py \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --output-root artifacts/residual_multiseed \
+  --conditioning-types concat moe \
+  --seeds 13 21 42 87 100 \
+  --epochs 5 \
+  --batch-size 8
+```
+
+Summarize residual MAE gains:
+
+```bash
+python scripts/analyze_part1_residual_multiseed.py \
+  --run-root artifacts/residual_multiseed \
+  --split test
 ```
 
 ## High-Variance Analysis
@@ -235,11 +278,12 @@ python scripts/inspect_meco_schema.py \
   --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda"
 ```
 
-Then dump Part 1 predictions including the train trials:
+The residual multiseed runner already dumps Part 1 predictions including the train trials.
+If you train a residual run manually, dump predictions after training:
 
 ```bash
 python scripts/dump_part1_predictions.py \
-  --run-dir artifacts/multiseed/moe_seed13 \
+  --run-dir artifacts/residual_multiseed/moe_residual_seed13 \
   --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
   --include-train \
   --batch-size 8
@@ -249,13 +293,14 @@ Build the Part 2 dataset:
 
 ```bash
 python scripts/build_part2_comprehension_dataset.py \
-  --part1-run-dir artifacts/multiseed/moe_seed13 \
+  --part1-run-dir artifacts/residual_multiseed/moe_residual_seed13 \
   --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
   --comprehension-path "data/primary data/comprehension data/joint_l1_acc_full_breakdown.rda" \
   --correctness-column ACCURACY \
   --question-column QUESTIONNUM \
   --question-materials-path "data/auxiliary files/reading task materials/comp-questions.xlsx" \
-  --text-materials-path "data/auxiliary files/reading task materials/supp texts.xlsx"
+  --text-materials-path "data/auxiliary files/reading task materials/supp texts.xlsx" \
+  --gaze-feature-space residual
 ```
 
 Train the Part 2 classifiers:
@@ -264,8 +309,8 @@ Quick sanity check before the language-model run:
 
 ```bash
 python scripts/train_part2_comprehension_risk.py \
-  --dataset-path artifacts/multiseed/moe_seed13/part2_comprehension/part2_dataset.csv \
-  --output-dir artifacts/multiseed/moe_seed13/part2_comprehension/linear_backup
+  --dataset-path artifacts/residual_multiseed/moe_residual_seed13/part2_comprehension/part2_dataset.csv \
+  --output-dir artifacts/residual_multiseed/moe_residual_seed13/part2_comprehension/linear_backup
 ```
 
 The key linear baselines are `item_question_only`, `item_question_plus_predicted_gaze`,
@@ -273,20 +318,21 @@ The key linear baselines are `item_question_only`, `item_question_plus_predicted
 
 ```bash
 python scripts/train_part2_original_lm.py \
-  --dataset-path artifacts/multiseed/moe_seed13/part2_comprehension/part2_dataset.csv
+  --dataset-path artifacts/residual_multiseed/moe_residual_seed13/part2_comprehension/part2_dataset.csv
 ```
 
 For all MoE seeds:
 
 ```bash
 python scripts/run_part2_multirun.py \
-  --run-root artifacts/multiseed \
+  --run-root artifacts/residual_multiseed \
   --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
   --comprehension-path "data/primary data/comprehension data/joint_l1_acc_full_breakdown.rda" \
   --correctness-column ACCURACY \
   --question-column QUESTIONNUM \
   --question-materials-path "data/auxiliary files/reading task materials/comp-questions.xlsx" \
   --text-materials-path "data/auxiliary files/reading task materials/supp texts.xlsx" \
+  --gaze-feature-space residual \
   --trainer original_lm \
   --epochs 5 \
   --batch-size 8
