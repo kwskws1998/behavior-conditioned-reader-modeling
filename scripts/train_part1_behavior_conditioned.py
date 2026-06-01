@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import sys
@@ -26,6 +27,9 @@ from part1_behavior_conditioned.data import (
 )
 from part1_behavior_conditioned.metrics import compute_token_regression_metrics
 from part1_behavior_conditioned.modeling import XLMRobertaForBehaviorConditionedTRT
+
+
+TARGET_RDA_NAME = "joint_l1_data_trimmed_version1.3.rda"
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,10 +67,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_rda_path(path: Path) -> Path:
+    if path.exists():
+        return path
+    candidates = sorted(Path("data").rglob(TARGET_RDA_NAME))
+    if len(candidates) == 1:
+        print(f"RDA path not found at {path}; using discovered file {candidates[0]}", flush=True)
+        return candidates[0]
+    if len(candidates) > 1:
+        candidate_list = "\n".join(str(candidate) for candidate in candidates)
+        raise FileNotFoundError(f"RDA path not found at {path}. Multiple candidates found:\n{candidate_list}")
+    raise FileNotFoundError(
+        f"RDA path not found at {path}. Run `find data -name '{TARGET_RDA_NAME}' -print` "
+        "or unzip the MECO data archive under data/."
+    )
+
+
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    args.rda_path = resolve_rda_path(args.rda_path)
     data = load_meco_rda(args.rda_path, lang=args.lang)
     explicit_test_readers = [item.strip() for item in args.test_readers.split(",") if item.strip()] or None
     raw_datasets = build_part1_raw_datasets(
@@ -153,26 +174,34 @@ def main() -> None:
     )
     collator = DataCollatorForBehaviorConditionedTokenRegression(tokenizer=tokenizer)
 
-    training_args = TrainingArguments(
-        output_dir=str(args.output_dir / "checkpoints"),
-        evaluation_strategy="epoch",
-        logging_strategy="epoch",
-        save_strategy="epoch",
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
-        num_train_epochs=args.epochs,
-        max_steps=args.max_steps,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        warmup_ratio=args.warmup_ratio,
-        report_to=[],
-        metric_for_best_model="eval_mae",
-        greater_is_better=False,
-        load_best_model_at_end=True,
-        remove_unused_columns=True,
-        seed=args.seed,
-        use_cpu=args.use_cpu,
-    )
+    training_kwargs = {
+        "output_dir": str(args.output_dir / "checkpoints"),
+        "logging_strategy": "epoch",
+        "save_strategy": "epoch",
+        "per_device_train_batch_size": args.batch_size,
+        "per_device_eval_batch_size": args.batch_size,
+        "num_train_epochs": args.epochs,
+        "max_steps": args.max_steps,
+        "learning_rate": args.learning_rate,
+        "weight_decay": args.weight_decay,
+        "warmup_ratio": args.warmup_ratio,
+        "report_to": [],
+        "metric_for_best_model": "eval_mae",
+        "greater_is_better": False,
+        "load_best_model_at_end": True,
+        "remove_unused_columns": True,
+        "seed": args.seed,
+    }
+    training_arg_names = inspect.signature(TrainingArguments.__init__).parameters
+    if "eval_strategy" in training_arg_names:
+        training_kwargs["eval_strategy"] = "epoch"
+    else:
+        training_kwargs["evaluation_strategy"] = "epoch"
+    if "use_cpu" in training_arg_names:
+        training_kwargs["use_cpu"] = args.use_cpu
+    else:
+        training_kwargs["no_cuda"] = args.use_cpu
+    training_args = TrainingArguments(**training_kwargs)
 
     trainer = Trainer(
         model=model,
