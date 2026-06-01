@@ -105,6 +105,7 @@ def main() -> None:
     dataset = dataset.merge(split_features, on=["reader_id", "trial_id"], how="left")
     dataset = dataset.merge(gaze_features, on=["split", "reader_id", "trial_id"], how="left")
     dataset = add_question_features(dataset)
+    dataset = add_trial_features(dataset)
     dataset = compose_model_text(dataset)
     dataset = dataset.dropna(subset=["split"]).copy()
     dataset = dataset.sort_values(["split", "reader_id", "trial_id"]).reset_index(drop=True)
@@ -245,6 +246,22 @@ def add_question_features(data: pd.DataFrame) -> pd.DataFrame:
         data["question_num"] = question_num.fillna(question_num.median()).astype(float)
         for value in sorted(int(v) for v in question_num.dropna().unique()):
             data[f"question_is_{value}"] = (question_num == value).astype(float)
+    return data
+
+
+def add_trial_features(data: pd.DataFrame) -> pd.DataFrame:
+    data = data.copy()
+    trial_num = pd.to_numeric(data["trial_id"], errors="coerce")
+    data["trial_num"] = trial_num.astype(float)
+    for value in sorted(int(v) for v in trial_num.dropna().unique()):
+        data[f"trial_is_{value}"] = (trial_num == value).astype(float)
+    if "question_id" in data.columns:
+        question_num = pd.to_numeric(data["question_id"], errors="coerce")
+        for trial_value in sorted(int(v) for v in trial_num.dropna().unique()):
+            for question_value in sorted(int(v) for v in question_num.dropna().unique()):
+                data[f"trial_{trial_value}_question_{question_value}"] = (
+                    (trial_num == trial_value) & (question_num == question_value)
+                ).astype(float)
     return data
 
 

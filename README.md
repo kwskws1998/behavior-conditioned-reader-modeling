@@ -260,6 +260,17 @@ python scripts/build_part2_comprehension_dataset.py \
 
 Train the Part 2 classifiers:
 
+Quick sanity check before the language-model run:
+
+```bash
+python scripts/train_part2_comprehension_risk.py \
+  --dataset-path artifacts/multiseed/moe_seed13/part2_comprehension/part2_dataset.csv \
+  --output-dir artifacts/multiseed/moe_seed13/part2_comprehension/linear_backup
+```
+
+The key linear baselines are `item_question_only`, `item_question_plus_predicted_gaze`,
+`item_question_plus_mean_gaze`, and `item_question_plus_shuffled_gaze`.
+
 ```bash
 python scripts/train_part2_original_lm.py \
   --dataset-path artifacts/multiseed/moe_seed13/part2_comprehension/part2_dataset.csv

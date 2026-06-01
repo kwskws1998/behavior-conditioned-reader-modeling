@@ -101,6 +101,11 @@ def main() -> None:
 def build_feature_sets(data: pd.DataFrame) -> dict[str, list[str]]:
     data["constant_1"] = 1.0
     question = sorted(col for col in data.columns if col == "question_num" or col.startswith("question_is_"))
+    item = sorted(
+        col
+        for col in data.columns
+        if col == "trial_num" or col.startswith("trial_is_") or col.startswith("trial_")
+    )
     text = sorted(col for col in data.columns if col.startswith("text_"))
     profile = sorted(col for col in data.columns if col.startswith("profile_"))
     gaze_actual = sorted(col for col in data.columns if col.startswith("gaze_actual_") and not col.endswith("_observed_only"))
@@ -110,12 +115,17 @@ def build_feature_sets(data: pd.DataFrame) -> dict[str, list[str]]:
     interactions = make_interaction_features(data, profile, gaze_actual)
     return {
         "majority": ["constant_1"],
+        "item_question_only": item + question,
         "text_only": question + text,
         "mf_like_behavior": question + text + profile,
         "mb_like_predicted_gaze": question + text + gaze_actual,
         "mean_gaze": question + text + gaze_mean,
         "shuffled_gaze": question + text + gaze_shuffled,
         "arbitration_profile_x_gaze": question + text + profile + gaze_actual + interactions,
+        "item_question_plus_profile": item + question + profile,
+        "item_question_plus_predicted_gaze": item + question + gaze_actual,
+        "item_question_plus_mean_gaze": item + question + gaze_mean,
+        "item_question_plus_shuffled_gaze": item + question + gaze_shuffled,
     }
 
 
@@ -165,6 +175,9 @@ def has_required_signal(model_name: str, train: pd.DataFrame) -> bool:
         "mean_gaze": "gaze_mean_",
         "shuffled_gaze": "gaze_shuffled_",
         "arbitration_profile_x_gaze": "gaze_actual_",
+        "item_question_plus_predicted_gaze": "gaze_actual_",
+        "item_question_plus_mean_gaze": "gaze_mean_",
+        "item_question_plus_shuffled_gaze": "gaze_shuffled_",
     }
     prefix = requirements.get(model_name)
     if prefix is None:
@@ -237,6 +250,10 @@ def compare_models(test: pd.DataFrame, metric: str) -> dict[str, float]:
     pairs = [
         ("mb_like_predicted_gaze", "mf_like_behavior"),
         ("mb_like_predicted_gaze", "text_only"),
+        ("item_question_plus_predicted_gaze", "item_question_only"),
+        ("item_question_plus_predicted_gaze", "item_question_plus_mean_gaze"),
+        ("item_question_plus_predicted_gaze", "item_question_plus_shuffled_gaze"),
+        ("item_question_plus_predicted_gaze", "item_question_plus_profile"),
         ("arbitration_profile_x_gaze", "mb_like_predicted_gaze"),
         ("arbitration_profile_x_gaze", "mf_like_behavior"),
         ("mb_like_predicted_gaze", "mean_gaze"),
