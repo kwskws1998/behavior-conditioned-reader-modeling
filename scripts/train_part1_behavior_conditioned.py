@@ -61,6 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-train-sentences", type=int, default=0)
     parser.add_argument("--limit-eval-sentences", type=int, default=0)
     parser.add_argument("--warmup-ratio", type=float, default=0.05)
+    parser.add_argument("--save-checkpoints", action="store_true")
     parser.add_argument("--use-cpu", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-downloads", action="store_true")
@@ -177,7 +178,7 @@ def main() -> None:
     training_kwargs = {
         "output_dir": str(args.output_dir / "checkpoints"),
         "logging_strategy": "epoch",
-        "save_strategy": "epoch",
+        "save_total_limit": 1,
         "per_device_train_batch_size": args.batch_size,
         "per_device_eval_batch_size": args.batch_size,
         "num_train_epochs": args.epochs,
@@ -186,9 +187,6 @@ def main() -> None:
         "weight_decay": args.weight_decay,
         "warmup_ratio": args.warmup_ratio,
         "report_to": [],
-        "metric_for_best_model": "eval_mae",
-        "greater_is_better": False,
-        "load_best_model_at_end": True,
         "remove_unused_columns": True,
         "seed": args.seed,
     }
@@ -197,10 +195,20 @@ def main() -> None:
         training_kwargs["eval_strategy"] = "epoch"
     else:
         training_kwargs["evaluation_strategy"] = "epoch"
+    if args.save_checkpoints:
+        training_kwargs["save_strategy"] = "epoch"
+        training_kwargs["metric_for_best_model"] = "eval_mae"
+        training_kwargs["greater_is_better"] = False
+        training_kwargs["load_best_model_at_end"] = True
+    else:
+        training_kwargs["save_strategy"] = "no"
+        training_kwargs["load_best_model_at_end"] = False
     if "use_cpu" in training_arg_names:
         training_kwargs["use_cpu"] = args.use_cpu
     else:
         training_kwargs["no_cuda"] = args.use_cpu
+    if "save_only_model" in training_arg_names:
+        training_kwargs["save_only_model"] = True
     training_args = TrainingArguments(**training_kwargs)
 
     trainer = Trainer(
