@@ -214,6 +214,112 @@ gate_gain_correlations:
   gate entropy or expert assignment should explain which readers benefit more from MoE personalization.
 ```
 
+## Part 2 Main: Personalized Gaze-Augmented Comprehension Risk
+
+Part 2 tests whether predicted personalized gaze helps predict whether a reader answers a comprehension question correctly.
+
+The closed-form MECO task is:
+
+```text
+reader r + passage/trial p
+-> passage text + predicted gaze summary
+-> P(correct_{r,p})
+```
+
+First inspect the MECO schema to find the comprehension correctness column:
+
+```bash
+python scripts/inspect_meco_schema.py \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda"
+```
+
+Then dump Part 1 predictions including the train trials:
+
+```bash
+python scripts/dump_part1_predictions.py \
+  --run-dir artifacts/multiseed/moe_seed13 \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --include-train \
+  --batch-size 8
+```
+
+Build the Part 2 dataset:
+
+```bash
+python scripts/build_part2_comprehension_dataset.py \
+  --part1-run-dir artifacts/multiseed/moe_seed13 \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --correctness-column YOUR_CORRECTNESS_COLUMN
+```
+
+Train the Part 2 classifiers:
+
+```bash
+python scripts/train_part2_original_lm.py \
+  --dataset-path artifacts/multiseed/moe_seed13/part2_comprehension/part2_dataset.csv
+```
+
+For all MoE seeds:
+
+```bash
+python scripts/run_part2_multirun.py \
+  --run-root artifacts/multiseed \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --correctness-column YOUR_CORRECTNESS_COLUMN \
+  --trainer original_lm \
+  --epochs 5 \
+  --batch-size 8
+```
+
+Part 2 model families:
+
+```text
+text_only:
+  passage text only.
+
+text_plus_profile:
+  passage text + behavior-only profile z_r.
+
+text_plus_mean_gaze:
+  passage text + predicted gaze from the mean reader profile.
+
+text_plus_personalized_gaze:
+  passage text + predicted gaze from the actual reader profile.
+
+text_plus_shuffled_gaze:
+  passage text + predicted gaze from a mismatched reader profile.
+
+text_plus_profile_personalized_gaze:
+  passage text + z_r + predicted personalized gaze.
+```
+
+Main expected result:
+
+```text
+text_plus_personalized_gaze > text_only
+text_plus_personalized_gaze > text_plus_profile
+text_plus_personalized_gaze > text_plus_mean_gaze
+text_plus_personalized_gaze > text_plus_shuffled_gaze
+```
+
+Primary metrics:
+
+```text
+balanced_accuracy
+AUROC
+average_precision
+Brier score
+```
+
+Part 2 backup, not the main plan:
+
+```text
+train_part2_comprehension_risk.py
+```
+
+This is a lightweight linear/scikit-learn backup for MF/MB-inspired computational modeling.
+Use `--trainer linear_backup` in `run_part2_multirun.py` only when explicitly testing that backup story.
+
 ## What Enters the Model
 
 Input:

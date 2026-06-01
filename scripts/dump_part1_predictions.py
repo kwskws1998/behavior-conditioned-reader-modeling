@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from datasets import Dataset
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
@@ -20,7 +21,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from part1_behavior_conditioned.collator import DataCollatorForBehaviorConditionedTokenRegression
-from part1_behavior_conditioned.data import build_part1_raw_datasets, load_meco_rda, parse_int_list, tokenize_and_align_examples
+from part1_behavior_conditioned.data import (
+    build_part1_raw_datasets,
+    compute_behavior_profiles,
+    fit_profile_stats,
+    load_meco_rda,
+    make_sentence_examples,
+    normalize_profiles,
+    parse_int_list,
+    tokenize_and_align_examples,
+)
 from part1_behavior_conditioned.modeling import XLMRobertaForBehaviorConditionedTRT
 
 
@@ -36,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--include-train", action="store_true")
     parser.add_argument("--use-cpu", action="store_true")
     return parser.parse_args()
 
@@ -68,7 +79,10 @@ def main() -> None:
     collator = DataCollatorForBehaviorConditionedTokenRegression(tokenizer=tokenizer)
 
     manifest: dict[str, str] = {}
-    for split_name, datasets in [("dev", raw.dev), ("test", raw.test)]:
+    split_items = [("dev", raw.dev), ("test", raw.test)]
+    if args.include_train:
+        split_items.insert(0, ("train", build_train_profile_datasets(data, raw, summary, seed)))
+    for split_name, datasets in split_items:
         for profile_mode, raw_dataset in datasets.items():
             tokenized = tokenize_and_align_examples(raw_dataset, tokenizer=tokenizer, max_length=args.max_length)
             predictions = predict_logits(model, tokenized, collator, device=device, batch_size=args.batch_size)
@@ -168,6 +182,25 @@ def dump_word_predictions(
     pd.DataFrame(rows).to_csv(output_path, index=False)
 
 
+def build_train_profile_datasets(data: pd.DataFrame, raw, summary: dict, seed: int) -> dict[str, Dataset]:
+    raw_profiles = compute_behavior_profiles(data, profile_trials=summary.get("profile_trials", [1, 2]))
+    profile_stats = fit_profile_stats(raw_profiles, raw.split.train_readers)
+    profiles = normalize_profiles(raw_profiles, profile_stats)
+    train_trials = summary.get("train_trials", [3, 4, 5, 6, 7, 8, 9, 10])
+    return {
+        mode: Dataset.from_list(
+            make_sentence_examples(
+                data,
+                readers=raw.split.train_readers,
+                trials=train_trials,
+                profiles=profiles,
+                profile_mode=mode,
+                seed=seed,
+            )
+        )
+        for mode in ["actual", "mean", "shuffled"]
+    }
+
+
 if __name__ == "__main__":
     main()
-
