@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--lang", type=str, default="en")
     parser.add_argument("--split", choices=["dev", "test"], default="test")
+    parser.add_argument("--stratify-by", choices=["word_variance", "reader_deviation"], default="word_variance")
     parser.add_argument("--min-readers", type=int, default=5)
     parser.add_argument("--num-bins", type=int, default=4)
     return parser.parse_args()
@@ -42,7 +43,7 @@ def main() -> None:
 
     summary = json.loads((args.run_dir / "data_summary.json").read_text(encoding="utf-8"))
     data = load_meco_rda(args.rda_path, lang=args.lang)
-    variance = compute_train_reader_word_variance(
+    item_stats = compute_train_reader_word_stats(
         data=data,
         train_readers=summary["train_readers"],
         trials=summary.get("dev_trials", [11, 12]),
@@ -50,29 +51,36 @@ def main() -> None:
     )
 
     merged = load_and_merge_predictions(predictions_dir, split=args.split)
-    merged = merged.merge(variance, on=["trial_id", "sent_num", "word_num"], how="left")
-    merged = merged.dropna(subset=["word_var_log_trt"]).copy()
+    merged = merged.merge(item_stats, on=["trial_id", "sent_num", "word_num"], how="left")
+    merged = merged.dropna(subset=["word_mean_log_trt", "word_std_log_trt", "word_var_log_trt"]).copy()
+    merged["reader_deviation_z"] = (merged["true_log_trt"] - merged["word_mean_log_trt"]) / merged["word_std_log_trt"].clip(lower=1e-6)
+    merged["abs_reader_deviation_z"] = merged["reader_deviation_z"].abs()
     merged["gain_vs_mean"] = merged["abs_error_mean"] - merged["abs_error_actual"]
     merged["gain_vs_shuffled"] = merged["abs_error_shuffled"] - merged["abs_error_actual"]
     merged["actual_beats_mean"] = merged["gain_vs_mean"] > 0
     merged["actual_beats_shuffled"] = merged["gain_vs_shuffled"] > 0
-    merged["variance_bin"] = make_variance_bins(merged["word_var_log_trt"], args.num_bins)
+    stratify_column = "word_var_log_trt" if args.stratify_by == "word_variance" else "abs_reader_deviation_z"
+    merged["stratify_value"] = merged[stratify_column]
+    merged["stratify_bin"] = make_bins(merged["stratify_value"], args.num_bins)
 
     bins = summarize_bins(merged)
     contrast = summarize_high_low_contrast(bins)
 
-    merged.to_csv(output_dir / f"{args.split}_word_level_high_variance.csv", index=False)
-    bins.to_csv(output_dir / f"{args.split}_high_variance_bins.csv", index=False)
+    prefix = f"{args.split}_{args.stratify_by}"
+    merged.to_csv(output_dir / f"{prefix}_word_level.csv", index=False)
+    bins.to_csv(output_dir / f"{prefix}_bins.csv", index=False)
     report = {
         "run_dir": str(args.run_dir),
         "split": args.split,
+        "stratify_by": args.stratify_by,
+        "stratify_column": stratify_column,
         "n_rows": int(len(merged)),
         "min_readers": args.min_readers,
         "num_bins": args.num_bins,
         "overall": summarize_overall(merged),
         "high_low_contrast": contrast,
     }
-    (output_dir / f"{args.split}_high_variance_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    (output_dir / f"{prefix}_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
 
 
@@ -85,7 +93,7 @@ def resolve_rda_path(path: Path) -> Path:
     raise FileNotFoundError(f"Could not find {path}. Try: find data -name '{TARGET_RDA_NAME}' -print")
 
 
-def compute_train_reader_word_variance(
+def compute_train_reader_word_stats(
     data: pd.DataFrame,
     train_readers: list[str],
     trials: list[int],
@@ -134,7 +142,7 @@ def read_prediction_file(path: Path, suffix: str) -> pd.DataFrame:
     )
 
 
-def make_variance_bins(values: pd.Series, num_bins: int) -> pd.Series:
+def make_bins(values: pd.Series, num_bins: int) -> pd.Series:
     try:
         return pd.qcut(values, q=num_bins, labels=False, duplicates="drop") + 1
     except ValueError:
@@ -144,12 +152,14 @@ def make_variance_bins(values: pd.Series, num_bins: int) -> pd.Series:
 
 def summarize_bins(data: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for bin_id, group in data.groupby("variance_bin", sort=True):
+    for bin_id, group in data.groupby("stratify_bin", sort=True):
         rows.append(
             {
-                "variance_bin": int(bin_id),
+                "stratify_bin": int(bin_id),
                 "n": int(len(group)),
+                "mean_stratify_value": float(group["stratify_value"].mean()),
                 "mean_word_var_log_trt": float(group["word_var_log_trt"].mean()),
+                "mean_abs_reader_deviation_z": float(group["abs_reader_deviation_z"].mean()),
                 "mean_abs_error_actual": float(group["abs_error_actual"].mean()),
                 "mean_abs_error_mean": float(group["abs_error_mean"].mean()),
                 "mean_abs_error_shuffled": float(group["abs_error_shuffled"].mean()),
@@ -163,11 +173,11 @@ def summarize_bins(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def summarize_high_low_contrast(bins: pd.DataFrame) -> dict[str, float]:
-    low = bins.sort_values("variance_bin").iloc[0]
-    high = bins.sort_values("variance_bin").iloc[-1]
+    low = bins.sort_values("stratify_bin").iloc[0]
+    high = bins.sort_values("stratify_bin").iloc[-1]
     return {
-        "high_bin": int(high["variance_bin"]),
-        "low_bin": int(low["variance_bin"]),
+        "high_bin": int(high["stratify_bin"]),
+        "low_bin": int(low["stratify_bin"]),
         "gain_vs_mean_high_minus_low": float(high["gain_vs_mean"] - low["gain_vs_mean"]),
         "gain_vs_shuffled_high_minus_low": float(high["gain_vs_shuffled"] - low["gain_vs_shuffled"]),
         "win_rate_vs_mean_high_minus_low": float(high["win_rate_vs_mean"] - low["win_rate_vs_mean"]),
@@ -189,4 +199,3 @@ def summarize_overall(data: pd.DataFrame) -> dict[str, float]:
 
 if __name__ == "__main__":
     main()
-

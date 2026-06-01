@@ -136,13 +136,30 @@ For all completed runs under `artifacts/multiseed`:
 python scripts/run_high_variance_multirun.py \
   --run-root artifacts/multiseed \
   --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
-  --splits test
+  --splits test \
+  --stratify-by word_variance
 ```
 
 This writes:
 
 ```text
-artifacts/multiseed/high_variance_summary.csv
+artifacts/multiseed/word_variance_summary.csv
+```
+
+For the reader-specific deviation analysis:
+
+```bash
+python scripts/run_high_variance_multirun.py \
+  --run-root artifacts/multiseed \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --splits test \
+  --stratify-by reader_deviation
+```
+
+This writes:
+
+```text
+artifacts/multiseed/reader_deviation_summary.csv
 ```
 
 ## What Enters the Model

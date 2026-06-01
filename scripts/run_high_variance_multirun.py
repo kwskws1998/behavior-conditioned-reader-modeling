@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-root", type=Path, default=Path("artifacts/multiseed"))
     parser.add_argument("--rda-path", type=Path, required=True)
     parser.add_argument("--splits", nargs="+", default=["test"])
+    parser.add_argument("--stratify-by", choices=["word_variance", "reader_deviation"], default="word_variance")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--use-cpu", action="store_true")
     parser.add_argument("--skip-dump", action="store_true")
@@ -61,10 +62,12 @@ def main() -> None:
                 str(args.rda_path),
                 "--split",
                 split,
+                "--stratify-by",
+                args.stratify_by,
             ]
             print("Running:", " ".join(command), flush=True)
             subprocess.run(command, check=True)
-            report_path = run_dir / "high_variance" / f"{split}_high_variance_report.json"
+            report_path = run_dir / "high_variance" / f"{split}_{args.stratify_by}_report.json"
             report = json.loads(report_path.read_text(encoding="utf-8"))
             model, seed = parse_model_seed(run_dir.name)
             summary_rows.append(
@@ -73,12 +76,13 @@ def main() -> None:
                     "model": model,
                     "seed": seed,
                     "split": split,
+                    "stratify_by": args.stratify_by,
                     **report["overall"],
                     **report["high_low_contrast"],
                 }
             )
 
-    output_path = args.run_root / "high_variance_summary.csv"
+    output_path = args.run_root / f"{args.stratify_by}_summary.csv"
     pd.DataFrame(summary_rows).to_csv(output_path, index=False)
     print(f"Wrote {output_path}")
 
@@ -100,4 +104,3 @@ def parse_model_seed(name: str) -> tuple[str, int | None]:
 
 if __name__ == "__main__":
     main()
-
