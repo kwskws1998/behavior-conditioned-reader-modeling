@@ -160,11 +160,14 @@ def make_sentence_examples(
     examples: list[dict[str, Any]] = []
     group_cols = ["uniform_id", "trialid", "sentnum"]
     for (reader, trial_id, sent_num), sentence in subset.groupby(group_cols, sort=True):
-        words = sentence.sort_values("wordnum")["word"].astype(str).tolist()
-        labels = _make_log_trt_labels(sentence.sort_values("wordnum")["dur"])
+        sentence = sentence.sort_values("wordnum")
+        words = sentence["word"].astype(str).tolist()
+        word_nums = sentence["wordnum"].astype(int).tolist()
+        labels = _make_log_trt_labels(sentence["dur"])
         examples.append(
             {
                 "tokens": words,
+                "word_nums": word_nums,
                 "labels": labels,
                 "reader_profile": profile_lookup[str(reader)].astype(float).tolist(),
                 "reader_id": str(reader),
@@ -286,4 +289,3 @@ def _build_profile_lookup(
             shuffled = shuffled[1:] + shuffled[:1]
         return {reader: profiles[other] for reader, other in zip(readers, shuffled)}
     raise ValueError(f"Unknown profile_mode: {profile_mode}")
-

@@ -106,6 +106,8 @@ def main() -> None:
         "profile_trials": parse_int_list(args.profile_trials),
         "train_trials": parse_int_list(args.train_trials),
         "dev_trials": parse_int_list(args.dev_trials),
+        "seed": args.seed,
+        "conditioning_type": args.conditioning_type,
         "train_readers": raw_datasets.split.train_readers,
         "test_readers": raw_datasets.split.test_readers,
         "profile_features": raw_datasets.profile_stats.feature_names,

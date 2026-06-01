@@ -95,6 +95,56 @@ python scripts/run_part1_multiseed.py \
   --batch-size 8
 ```
 
+## High-Variance Analysis
+
+After a run finishes, dump word-level predictions:
+
+```bash
+python scripts/dump_part1_predictions.py \
+  --run-dir artifacts/multiseed/moe_seed13 \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda"
+```
+
+Then analyze whether actual reader profiles help more on words with high across-reader TRT variance:
+
+```bash
+python scripts/analyze_high_variance.py \
+  --run-dir artifacts/multiseed/moe_seed13 \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --split test
+```
+
+Outputs:
+
+```text
+artifacts/multiseed/moe_seed13/predictions/
+artifacts/multiseed/moe_seed13/high_variance/
+```
+
+The main quantities are:
+
+```text
+gain_vs_mean = abs_error_mean - abs_error_actual
+gain_vs_shuffled = abs_error_shuffled - abs_error_actual
+```
+
+Positive gain means the actual reader profile predicted TRT better than the baseline profile.
+
+For all completed runs under `artifacts/multiseed`:
+
+```bash
+python scripts/run_high_variance_multirun.py \
+  --run-root artifacts/multiseed \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --splits test
+```
+
+This writes:
+
+```text
+artifacts/multiseed/high_variance_summary.csv
+```
+
 ## What Enters the Model
 
 Input:
