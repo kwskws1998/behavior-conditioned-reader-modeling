@@ -50,13 +50,12 @@ def main() -> None:
     results = []
     predictions = []
     coefficients = []
+    skipped = []
     for model_name, features in feature_sets.items():
         available_features = [feature for feature in features if feature in data.columns]
-        if train[available_features].notna().sum().sum() == 0:
-            continue
-        if not has_required_signal(model_name, train):
-            continue
-        if model_name != "majority" and train[args.target_column].nunique() < 2:
+        skip_reason = get_skip_reason(model_name, available_features, train, args.target_column)
+        if skip_reason:
+            skipped.append({"model": model_name, "reason": skip_reason, "n_available_features": len(available_features)})
             continue
         model = make_model(model_name=model_name, seed=args.seed, max_iter=args.max_iter)
         model.fit(train[available_features], train[args.target_column].astype(int))
@@ -89,11 +88,13 @@ def main() -> None:
     results_df = pd.DataFrame(results)
     predictions_df = pd.concat(predictions, ignore_index=True) if predictions else pd.DataFrame()
     coefficients_df = pd.DataFrame(coefficients)
+    skipped_df = pd.DataFrame(skipped)
     results_df.to_csv(output_dir / "part2_metrics.csv", index=False)
     predictions_df.to_csv(output_dir / "part2_predictions.csv", index=False)
     coefficients_df.to_csv(output_dir / "part2_coefficients.csv", index=False)
+    skipped_df.to_csv(output_dir / "part2_skipped_models.csv", index=False)
 
-    summary = summarize_results(results_df)
+    summary = summarize_results(results_df, skipped_df)
     (output_dir / "part2_report.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
 
@@ -140,13 +141,16 @@ def make_interaction_features(data: pd.DataFrame, profile: list[str], gaze_actua
         for col in gaze_actual
         if any(key in col for key in ["mean", "p90", "top10_mean", "std"])
     ]
-    created = []
+    interaction_values = {}
     for p_col in selected_profile:
         for g_col in selected_gaze:
             name = f"interaction__{p_col}__x__{g_col}"
-            data[name] = data[p_col] * data[g_col]
-            created.append(name)
-    return created
+            interaction_values[name] = data[p_col] * data[g_col]
+    if interaction_values:
+        interactions = pd.DataFrame(interaction_values, index=data.index)
+        for col in interactions.columns:
+            data[col] = interactions[col]
+    return list(interaction_values)
 
 
 def make_model(model_name: str, seed: int, max_iter: int):
@@ -170,6 +174,14 @@ def make_model(model_name: str, seed: int, max_iter: int):
 
 
 def has_required_signal(model_name: str, train: pd.DataFrame) -> bool:
+    prefix = required_signal_prefix(model_name)
+    if prefix is None:
+        return True
+    cols = [col for col in train.columns if col.startswith(prefix) and not col.endswith("_observed_only")]
+    return bool(cols) and train[cols].notna().sum().sum() > 0
+
+
+def required_signal_prefix(model_name: str) -> str | None:
     requirements = {
         "mb_like_predicted_gaze": "gaze_actual_",
         "mean_gaze": "gaze_mean_",
@@ -179,11 +191,24 @@ def has_required_signal(model_name: str, train: pd.DataFrame) -> bool:
         "item_question_plus_mean_gaze": "gaze_mean_",
         "item_question_plus_shuffled_gaze": "gaze_shuffled_",
     }
-    prefix = requirements.get(model_name)
-    if prefix is None:
-        return True
-    cols = [col for col in train.columns if col.startswith(prefix) and not col.endswith("_observed_only")]
-    return bool(cols) and train[cols].notna().sum().sum() > 0
+    return requirements.get(model_name)
+
+
+def get_skip_reason(model_name: str, available_features: list[str], train: pd.DataFrame, target_column: str) -> str:
+    if not available_features:
+        return "no available feature columns"
+    if train[available_features].notna().sum().sum() == 0:
+        return "all selected feature values are missing in train"
+    prefix = required_signal_prefix(model_name)
+    if prefix is not None:
+        cols = [col for col in train.columns if col.startswith(prefix) and not col.endswith("_observed_only")]
+        if not cols:
+            return f"no columns with required prefix {prefix!r}"
+        if train[cols].notna().sum().sum() == 0:
+            return f"required prefix {prefix!r} exists, but all train values are missing"
+    if model_name != "majority" and train[target_column].nunique() < 2:
+        return "train split has fewer than two target classes"
+    return ""
 
 
 def predict_probability(model, features: pd.DataFrame) -> np.ndarray:
@@ -225,13 +250,15 @@ def extract_coefficients(model, model_name: str, features: list[str]) -> list[di
     return rows
 
 
-def summarize_results(results: pd.DataFrame) -> dict[str, object]:
+def summarize_results(results: pd.DataFrame, skipped: pd.DataFrame) -> dict[str, object]:
     report = {
         "metrics_path": "part2_metrics.csv",
         "predictions_path": "part2_predictions.csv",
         "coefficients_path": "part2_coefficients.csv",
+        "skipped_models_path": "part2_skipped_models.csv",
         "test_metrics": {},
         "main_comparisons": {},
+        "skipped_models": skipped.to_dict(orient="records") if not skipped.empty else [],
     }
     test = results[results["split"] == "test"].copy()
     for _, row in test.iterrows():
