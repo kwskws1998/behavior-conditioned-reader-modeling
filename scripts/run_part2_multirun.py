@@ -16,8 +16,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", type=Path, default=Path("artifacts/multiseed"))
     parser.add_argument("--rda-path", type=Path, required=True)
+    parser.add_argument("--comprehension-path", type=Path, default=None)
     parser.add_argument("--correctness-column", type=str, default="")
     parser.add_argument("--question-column", type=str, default="")
+    parser.add_argument("--question-materials-path", type=Path, default=None)
+    parser.add_argument("--text-materials-path", type=Path, default=None)
     parser.add_argument("--trainer", choices=["original_lm", "linear_backup"], default="original_lm")
     parser.add_argument("--epochs", type=float, default=5.0)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -69,10 +72,16 @@ def main() -> None:
             "--output-path",
             str(dataset_path),
         ]
+        if args.comprehension_path:
+            command.extend(["--comprehension-path", str(args.comprehension_path)])
         if args.correctness_column:
             command.extend(["--correctness-column", args.correctness_column])
         if args.question_column:
             command.extend(["--question-column", args.question_column])
+        if args.question_materials_path:
+            command.extend(["--question-materials-path", str(args.question_materials_path)])
+        if args.text_materials_path:
+            command.extend(["--text-materials-path", str(args.text_materials_path)])
         print("Running:", " ".join(command), flush=True)
         subprocess.run(command, check=True)
 

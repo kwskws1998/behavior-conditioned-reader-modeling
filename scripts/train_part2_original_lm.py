@@ -284,17 +284,18 @@ def make_prediction_frame(
 
 
 def select_feature_columns(data: pd.DataFrame, variant: str) -> list[str]:
+    question = sorted(col for col in data.columns if col == "question_num" or col.startswith("question_is_"))
     profile = sorted(col for col in data.columns if col.startswith("profile_"))
     actual = sorted(col for col in data.columns if col.startswith("gaze_actual_") and not col.endswith("_observed_only"))
     mean = sorted(col for col in data.columns if col.startswith("gaze_mean_") and not col.endswith("_observed_only"))
     shuffled = sorted(col for col in data.columns if col.startswith("gaze_shuffled_") and not col.endswith("_observed_only"))
     mapping = {
-        "text_only": [],
-        "text_plus_profile": profile,
-        "text_plus_mean_gaze": mean,
-        "text_plus_personalized_gaze": actual,
-        "text_plus_shuffled_gaze": shuffled,
-        "text_plus_profile_personalized_gaze": profile + actual,
+        "text_only": question,
+        "text_plus_profile": question + profile,
+        "text_plus_mean_gaze": question + mean,
+        "text_plus_personalized_gaze": question + actual,
+        "text_plus_shuffled_gaze": question + shuffled,
+        "text_plus_profile_personalized_gaze": question + profile + actual,
     }
     if variant not in mapping:
         raise ValueError(f"Unknown variant: {variant}")

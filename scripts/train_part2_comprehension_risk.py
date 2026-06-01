@@ -100,6 +100,7 @@ def main() -> None:
 
 def build_feature_sets(data: pd.DataFrame) -> dict[str, list[str]]:
     data["constant_1"] = 1.0
+    question = sorted(col for col in data.columns if col == "question_num" or col.startswith("question_is_"))
     text = sorted(col for col in data.columns if col.startswith("text_"))
     profile = sorted(col for col in data.columns if col.startswith("profile_"))
     gaze_actual = sorted(col for col in data.columns if col.startswith("gaze_actual_") and not col.endswith("_observed_only"))
@@ -109,12 +110,12 @@ def build_feature_sets(data: pd.DataFrame) -> dict[str, list[str]]:
     interactions = make_interaction_features(data, profile, gaze_actual)
     return {
         "majority": ["constant_1"],
-        "text_only": text,
-        "mf_like_behavior": text + profile,
-        "mb_like_predicted_gaze": text + gaze_actual,
-        "mean_gaze": text + gaze_mean,
-        "shuffled_gaze": text + gaze_shuffled,
-        "arbitration_profile_x_gaze": text + profile + gaze_actual + interactions,
+        "text_only": question + text,
+        "mf_like_behavior": question + text + profile,
+        "mb_like_predicted_gaze": question + text + gaze_actual,
+        "mean_gaze": question + text + gaze_mean,
+        "shuffled_gaze": question + text + gaze_shuffled,
+        "arbitration_profile_x_gaze": question + text + profile + gaze_actual + interactions,
     }
 
 

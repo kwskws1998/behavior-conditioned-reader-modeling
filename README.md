@@ -218,15 +218,17 @@ gate_gain_correlations:
 
 Part 2 tests whether predicted personalized gaze helps predict whether a reader answers a comprehension question correctly.
 
-The closed-form MECO task is:
+The closed-form MECO task is question-level:
 
 ```text
-reader r + passage/trial p
--> passage text + predicted gaze summary
--> P(correct_{r,p})
+reader r + passage/trial p + comprehension question q
+-> passage text + question text + predicted gaze summary
+-> P(correct_{r,p,q})
 ```
 
-First inspect the MECO schema to find the comprehension correctness column:
+First inspect the MECO schema to find the comprehension correctness column. In MECO 1.3, the relevant
+label file is typically `joint_l1_acc_full_breakdown.rda` with `ACCURACY` and `QUESTIONNUM`, while
+the question text comes from `comp-questions.xlsx`.
 
 ```bash
 python scripts/inspect_meco_schema.py \
@@ -249,7 +251,11 @@ Build the Part 2 dataset:
 python scripts/build_part2_comprehension_dataset.py \
   --part1-run-dir artifacts/multiseed/moe_seed13 \
   --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
-  --correctness-column YOUR_CORRECTNESS_COLUMN
+  --comprehension-path "data/primary data/comprehension data/joint_l1_acc_full_breakdown.rda" \
+  --correctness-column ACCURACY \
+  --question-column QUESTIONNUM \
+  --question-materials-path "data/auxiliary files/reading task materials/comp-questions.xlsx" \
+  --text-materials-path "data/auxiliary files/reading task materials/supp texts.xlsx"
 ```
 
 Train the Part 2 classifiers:
@@ -265,7 +271,11 @@ For all MoE seeds:
 python scripts/run_part2_multirun.py \
   --run-root artifacts/multiseed \
   --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
-  --correctness-column YOUR_CORRECTNESS_COLUMN \
+  --comprehension-path "data/primary data/comprehension data/joint_l1_acc_full_breakdown.rda" \
+  --correctness-column ACCURACY \
+  --question-column QUESTIONNUM \
+  --question-materials-path "data/auxiliary files/reading task materials/comp-questions.xlsx" \
+  --text-materials-path "data/auxiliary files/reading task materials/supp texts.xlsx" \
   --trainer original_lm \
   --epochs 5 \
   --batch-size 8
@@ -275,22 +285,22 @@ Part 2 model families:
 
 ```text
 text_only:
-  passage text only.
+  passage text + comprehension question text.
 
 text_plus_profile:
-  passage text + behavior-only profile z_r.
+  passage/question text + behavior-only profile z_r.
 
 text_plus_mean_gaze:
-  passage text + predicted gaze from the mean reader profile.
+  passage/question text + predicted gaze from the mean reader profile.
 
 text_plus_personalized_gaze:
-  passage text + predicted gaze from the actual reader profile.
+  passage/question text + predicted gaze from the actual reader profile.
 
 text_plus_shuffled_gaze:
-  passage text + predicted gaze from a mismatched reader profile.
+  passage/question text + predicted gaze from a mismatched reader profile.
 
 text_plus_profile_personalized_gaze:
-  passage text + z_r + predicted personalized gaze.
+  passage/question text + z_r + predicted personalized gaze.
 ```
 
 Main expected result:
