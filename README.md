@@ -162,6 +162,58 @@ This writes:
 artifacts/multiseed/reader_deviation_summary.csv
 ```
 
+## MoE Gate Analysis
+
+After the MoE runs finish, analyze whether the profile-conditioned gate behaves like a latent reader-type variable:
+
+```bash
+python scripts/analyze_moe_gates.py \
+  --run-root artifacts/multiseed \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda"
+```
+
+If you only want one run:
+
+```bash
+python scripts/analyze_moe_gates.py \
+  --run-dir artifacts/multiseed/moe_seed13 \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda"
+```
+
+Main outputs:
+
+```text
+artifacts/multiseed/gate_analysis/gate_analysis_report.json
+artifacts/multiseed/gate_analysis/all_moe_gates.csv
+artifacts/multiseed/gate_analysis/all_gate_behavior_correlations.csv
+artifacts/multiseed/gate_analysis/all_gate_stability.csv
+artifacts/multiseed/gate_analysis/all_gate_pca.csv
+artifacts/multiseed/gate_analysis/all_dominant_expert_behavior_profiles.csv
+```
+
+If word-level predictions already exist under each run's `predictions/` directory, the script also writes:
+
+```text
+artifacts/multiseed/gate_analysis/all_gate_gain_correlations.csv
+artifacts/multiseed/gate_analysis/all_dominant_expert_gains.csv
+```
+
+Interpretation:
+
+```text
+gate_stability:
+  same reader trial1-vs-trial2 similarity should be higher than different-reader similarity.
+
+gate_behavior_correlations:
+  gate weights should correlate with behavior-only profile features such as skip, reread, or regression rates.
+
+dominant_expert_behavior_profiles:
+  each dominant expert should show a different behavior profile.
+
+gate_gain_correlations:
+  gate entropy or expert assignment should explain which readers benefit more from MoE personalization.
+```
+
 ## What Enters the Model
 
 Input:
