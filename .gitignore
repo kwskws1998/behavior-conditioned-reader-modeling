@@ -1,0 +1,29 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Data and generated outputs
+data/*
+!data/.gitkeep
+artifacts/*
+!artifacts/.gitkeep
+models/
+checkpoints/
+runs/
+wandb/
+
+# Large/raw files
+*.rda
+*.zip
+*.tar.gz
+*.tgz
+*.pt
+*.bin
+*.safetensors
+
