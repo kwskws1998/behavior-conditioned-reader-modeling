@@ -22,7 +22,7 @@ from part1_behavior_conditioned.data import BASELINE_KEY_COLUMNS, load_meco_rda
 
 TARGET_RDA_NAME = "joint_l1_data_trimmed_version1.3.rda"
 DEFAULT_SOURCES = ["nrc_vad.tsv", "warriner_et_al.tsv", "scott_et_al.tsv"]
-DEFAULT_VAD_DRIVE_URL = "https://drive.google.com/uc?id=1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj"
+DEFAULT_VAD_DRIVE_URL = "https://drive.google.com/file/d/1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj/view?usp=sharing"
 DEFAULT_VAD_ARCHIVE_PATH = Path("data") / "auxiliary files" / "Archive.zip"
 VAD_ARCHIVE_FALLBACK_NAMES = ["Archive.zip", "Archive (1).zip"]
 
@@ -76,7 +76,10 @@ def ensure_vad_archive(path: Path, url: str, allow_download: bool) -> Path:
     if not allow_download:
         raise FileNotFoundError(f"VAD archive not found: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    command = [sys.executable, "-m", "gdown", url, "-O", str(path)]
+    command = [sys.executable, "-m", "gdown"]
+    if gdown_supports_flag("--fuzzy"):
+        command.append("--fuzzy")
+    command.extend([url, "-O", str(path)])
     print("Downloading VAD archive:", " ".join(command), flush=True)
     subprocess.run(command, check=True)
     if not path.exists():
@@ -91,6 +94,16 @@ def archive_candidates(path: Path) -> list[Path]:
         if candidate not in candidates:
             candidates.append(candidate)
     return candidates
+
+
+def gdown_supports_flag(flag: str) -> bool:
+    result = subprocess.run(
+        [sys.executable, "-m", "gdown", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return flag in result.stdout
 
 
 def resolve_rda_path(path: Path) -> Path:

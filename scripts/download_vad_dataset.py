@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 
-DEFAULT_VAD_DRIVE_URL = "https://drive.google.com/uc?id=1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj"
+DEFAULT_VAD_DRIVE_URL = "https://drive.google.com/file/d/1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj/view?usp=sharing"
 DEFAULT_VAD_ARCHIVE_PATH = Path("data") / "auxiliary files" / "Archive.zip"
 
 
@@ -27,9 +27,22 @@ def main() -> None:
         print(f"VAD archive already exists: {args.output_path}")
         return
     args.output_path.parent.mkdir(parents=True, exist_ok=True)
-    command = [sys.executable, "-m", "gdown", args.url, "-O", str(args.output_path)]
+    command = [sys.executable, "-m", "gdown"]
+    if gdown_supports_flag("--fuzzy"):
+        command.append("--fuzzy")
+    command.extend([args.url, "-O", str(args.output_path)])
     print("Running:", " ".join(command), flush=True)
     subprocess.run(command, check=True)
+
+
+def gdown_supports_flag(flag: str) -> bool:
+    result = subprocess.run(
+        [sys.executable, "-m", "gdown", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return flag in result.stdout
 
 
 if __name__ == "__main__":
