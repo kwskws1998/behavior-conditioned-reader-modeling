@@ -10,12 +10,13 @@ from pathlib import Path
 
 
 DEFAULT_VAD_DRIVE_URL = "https://drive.google.com/uc?id=1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj"
+DEFAULT_VAD_ARCHIVE_PATH = Path("data") / "auxiliary files" / "Archive.zip"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", type=str, default=DEFAULT_VAD_DRIVE_URL)
-    parser.add_argument("--output-path", type=Path, default=Path("data") / "auxiliary files" / "Archive (1).zip")
+    parser.add_argument("--output-path", type=Path, default=DEFAULT_VAD_ARCHIVE_PATH)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 

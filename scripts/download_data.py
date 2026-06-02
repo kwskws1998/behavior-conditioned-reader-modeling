@@ -34,14 +34,26 @@ def main() -> None:
         "-O",
         str(args.output_dir),
     ]
-    if args.remaining_ok:
+    if args.remaining_ok and gdown_supports_remaining_ok():
         command.append("--remaining-ok")
+    elif args.remaining_ok:
+        print("Installed gdown does not support --remaining-ok; continuing without it.", flush=True)
     subprocess.run(command, check=True)
     if not args.no_unzip:
         for zip_path in args.output_dir.rglob("*.zip"):
             print(f"Extracting {zip_path} into {args.output_dir}", flush=True)
             with zipfile.ZipFile(zip_path) as archive:
                 archive.extractall(args.output_dir)
+
+
+def gdown_supports_remaining_ok() -> bool:
+    result = subprocess.run(
+        [sys.executable, "-m", "gdown", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return "--remaining-ok" in result.stdout
 
 
 if __name__ == "__main__":

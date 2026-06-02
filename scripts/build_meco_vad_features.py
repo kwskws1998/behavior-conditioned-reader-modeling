@@ -23,12 +23,14 @@ from part1_behavior_conditioned.data import BASELINE_KEY_COLUMNS, load_meco_rda
 TARGET_RDA_NAME = "joint_l1_data_trimmed_version1.3.rda"
 DEFAULT_SOURCES = ["nrc_vad.tsv", "warriner_et_al.tsv", "scott_et_al.tsv"]
 DEFAULT_VAD_DRIVE_URL = "https://drive.google.com/uc?id=1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj"
+DEFAULT_VAD_ARCHIVE_PATH = Path("data") / "auxiliary files" / "Archive.zip"
+VAD_ARCHIVE_FALLBACK_NAMES = ["Archive.zip", "Archive (1).zip"]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rda-path", type=Path, default=Path("data") / "primary data" / "eye tracking data" / TARGET_RDA_NAME)
-    parser.add_argument("--vad-archive-path", type=Path, default=Path("data") / "auxiliary files" / "Archive (1).zip")
+    parser.add_argument("--vad-archive-path", type=Path, default=DEFAULT_VAD_ARCHIVE_PATH)
     parser.add_argument("--vad-drive-url", type=str, default=DEFAULT_VAD_DRIVE_URL)
     parser.add_argument("--no-download", action="store_true")
     parser.add_argument("--output-path", type=Path, default=Path("artifacts/vad/meco_en_vad_features.csv"))
@@ -40,9 +42,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     rda_path = resolve_rda_path(args.rda_path)
-    ensure_vad_archive(args.vad_archive_path, args.vad_drive_url, allow_download=not args.no_download)
+    vad_archive_path = ensure_vad_archive(args.vad_archive_path, args.vad_drive_url, allow_download=not args.no_download)
     meco = load_meco_rda(rda_path, lang=args.lang)
-    lexicon, source_report = load_combined_lexicon(args.vad_archive_path, args.sources)
+    lexicon, source_report = load_combined_lexicon(vad_archive_path, args.sources)
     features = build_features(meco, lexicon)
     validate_features(features)
 
@@ -50,7 +52,7 @@ def main() -> None:
     features.to_csv(args.output_path, index=False)
     manifest = {
         "rda_path": str(rda_path),
-        "vad_archive_path": str(args.vad_archive_path),
+        "vad_archive_path": str(vad_archive_path),
         "output_path": str(args.output_path),
         "language": args.lang,
         "sources": args.sources,
@@ -65,9 +67,12 @@ def main() -> None:
     print(json.dumps(manifest, indent=2))
 
 
-def ensure_vad_archive(path: Path, url: str, allow_download: bool) -> None:
-    if path.exists():
-        return
+def ensure_vad_archive(path: Path, url: str, allow_download: bool) -> Path:
+    for candidate in archive_candidates(path):
+        if candidate.exists():
+            if candidate != path:
+                print(f"Using existing VAD archive: {candidate}", flush=True)
+            return candidate
     if not allow_download:
         raise FileNotFoundError(f"VAD archive not found: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +81,16 @@ def ensure_vad_archive(path: Path, url: str, allow_download: bool) -> None:
     subprocess.run(command, check=True)
     if not path.exists():
         raise FileNotFoundError(f"gdown finished but VAD archive was not created: {path}")
+    return path
+
+
+def archive_candidates(path: Path) -> list[Path]:
+    candidates = [path]
+    for name in VAD_ARCHIVE_FALLBACK_NAMES:
+        candidate = path.parent / name
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
 
 
 def resolve_rda_path(path: Path) -> Path:
