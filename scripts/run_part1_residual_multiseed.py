@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--num-experts", type=int, default=4)
+    parser.add_argument("--save-checkpoints", action="store_true")
+    parser.add_argument("--delete-checkpoints-after-save", action="store_true")
     parser.add_argument("--use-cpu", action="store_true")
     parser.add_argument("--allow-downloads", action="store_true")
     return parser.parse_args()
@@ -100,8 +103,12 @@ def run_train(
         command.append("--use-cpu")
     if args.allow_downloads:
         command.append("--allow-downloads")
+    if args.save_checkpoints:
+        command.append("--save-checkpoints")
     print("Running:", " ".join(command), flush=True)
     subprocess.run(command, check=True)
+    if args.delete_checkpoints_after_save:
+        delete_checkpoints(output_dir)
 
 
 def run_dump(dump_script: Path, rda_path: Path, run_dir: Path, args: argparse.Namespace) -> None:
@@ -120,6 +127,13 @@ def run_dump(dump_script: Path, rda_path: Path, run_dir: Path, args: argparse.Na
         command.append("--use-cpu")
     print("Running:", " ".join(command), flush=True)
     subprocess.run(command, check=True)
+
+
+def delete_checkpoints(output_dir: Path) -> None:
+    checkpoints_dir = output_dir / "checkpoints"
+    if checkpoints_dir.exists():
+        print(f"Deleting checkpoints after best_model save: {checkpoints_dir}", flush=True)
+        shutil.rmtree(checkpoints_dir)
 
 
 if __name__ == "__main__":

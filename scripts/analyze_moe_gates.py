@@ -540,7 +540,7 @@ def discover_moe_run_dirs(run_root: Path) -> list[Path]:
         path
         for path in run_root.iterdir()
         if path.is_dir()
-        and path.name.startswith("moe_seed")
+        and re.match(r"moe\d*.*_seed\d+$", path.name)
         and (path / "best_model").exists()
         and (path / "data_summary.json").exists()
     )
