@@ -40,11 +40,13 @@ def main() -> None:
         "-O",
         str(args.output_dir),
     ]
+    add_gdown_flag(command, "--no-cookies")
+    add_gdown_flag(command, "--continue")
     if args.remaining_ok and gdown_supports_remaining_ok():
         command.append("--remaining-ok")
     elif args.remaining_ok:
         print("Installed gdown does not support --remaining-ok; continuing without it.", flush=True)
-    subprocess.run(command, check=True)
+    run_gdown(command)
 
     vad_archive_path = None
     if not args.skip_vad:
@@ -78,11 +80,12 @@ def ensure_vad_archive(path: Path, url: str, output_dir: Path) -> Path:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     command = [sys.executable, "-m", "gdown"]
-    if gdown_supports_flag("--fuzzy"):
-        command.append("--fuzzy")
+    add_gdown_flag(command, "--fuzzy")
+    add_gdown_flag(command, "--no-cookies")
+    add_gdown_flag(command, "--continue")
     command.extend([url, "-O", str(path)])
     print("Downloading VAD archive:", " ".join(command), flush=True)
-    subprocess.run(command, check=True)
+    run_gdown(command)
     if not path.exists():
         raise FileNotFoundError(f"gdown finished but VAD archive was not created: {path}")
     return path
@@ -108,6 +111,25 @@ def gdown_supports_flag(flag: str) -> bool:
         text=True,
     )
     return flag in result.stdout
+
+
+def add_gdown_flag(command: list[str], flag: str) -> None:
+    if gdown_supports_flag(flag):
+        command.append(flag)
+
+
+def run_gdown(command: list[str]) -> None:
+    print("Running:", " ".join(command), flush=True)
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError:
+        if "--no-cookies" in command:
+            raise
+        retry = command.copy()
+        insert_at = retry.index("-O") if "-O" in retry else len(retry)
+        retry.insert(insert_at, "--no-cookies")
+        print("gdown failed; retrying without cookies:", " ".join(retry), flush=True)
+        subprocess.run(retry, check=True)
 
 
 if __name__ == "__main__":

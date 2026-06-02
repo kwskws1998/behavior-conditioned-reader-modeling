@@ -28,8 +28,9 @@ def main() -> None:
         return
     args.output_path.parent.mkdir(parents=True, exist_ok=True)
     command = [sys.executable, "-m", "gdown"]
-    if gdown_supports_flag("--fuzzy"):
-        command.append("--fuzzy")
+    add_gdown_flag(command, "--fuzzy")
+    add_gdown_flag(command, "--no-cookies")
+    add_gdown_flag(command, "--continue")
     command.extend([args.url, "-O", str(args.output_path)])
     print("Running:", " ".join(command), flush=True)
     subprocess.run(command, check=True)
@@ -43,6 +44,11 @@ def gdown_supports_flag(flag: str) -> bool:
         text=True,
     )
     return flag in result.stdout
+
+
+def add_gdown_flag(command: list[str], flag: str) -> None:
+    if gdown_supports_flag(flag):
+        command.append(flag)
 
 
 if __name__ == "__main__":
