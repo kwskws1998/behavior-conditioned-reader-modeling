@@ -14,6 +14,24 @@ DEFAULT_DRIVE_URL = "https://drive.google.com/drive/folders/1zMmdLosiGM8ZY2LNu22
 DEFAULT_VAD_DRIVE_URL = "https://drive.google.com/file/d/1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj/view?usp=sharing"
 DEFAULT_VAD_OUTPUT_PATH = Path("data") / "auxiliary files" / "Archive.zip"
 VAD_ARCHIVE_FALLBACK_NAMES = ["Archive.zip", "Archive (1).zip"]
+ESSENTIAL_MECO_FILES = [
+    (
+        "1OeYJ1JTSGoZVJJpeafFCMRPuBGHrHHjy",
+        Path("primary data") / "eye tracking data" / "joint_l1_data_trimmed_version1.3.rda",
+    ),
+    (
+        "12Ae_InyNwnEzuaLyTooRD73aw_ewnO4d",
+        Path("primary data") / "comprehension data" / "joint_l1_acc_full_breakdown.rda",
+    ),
+    (
+        "11B4Mw4TIKPhuIkiSsXb6vGtK9_y7zO7M",
+        Path("auxiliary files") / "reading task materials" / "comp-questions.xlsx",
+    ),
+    (
+        "1z7YykDgpsqO_ygIZndjona32fL_7I5V9",
+        Path("auxiliary files") / "reading task materials" / "supp texts.xlsx",
+    ),
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vad-url", type=str, default=DEFAULT_VAD_DRIVE_URL)
     parser.add_argument("--vad-output-path", type=Path, default=DEFAULT_VAD_OUTPUT_PATH)
     parser.add_argument("--skip-vad", action="store_true")
+    parser.add_argument("--essential-only", action="store_true")
     parser.add_argument("--remaining-ok", action="store_true")
     parser.add_argument("--no-unzip", action="store_true")
     return parser.parse_args()
@@ -31,22 +50,29 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    command = [
-        sys.executable,
-        "-m",
-        "gdown",
-        "--folder",
-        args.url,
-        "-O",
-        str(args.output_dir),
-    ]
-    add_gdown_flag(command, "--no-cookies")
-    add_gdown_flag(command, "--continue")
-    if args.remaining_ok and gdown_supports_remaining_ok():
-        command.append("--remaining-ok")
-    elif args.remaining_ok:
-        print("Installed gdown does not support --remaining-ok; continuing without it.", flush=True)
-    run_gdown(command)
+    if args.essential_only:
+        download_essential_meco_files(args.output_dir)
+    else:
+        command = [
+            sys.executable,
+            "-m",
+            "gdown",
+            "--folder",
+            args.url,
+            "-O",
+            str(args.output_dir),
+        ]
+        add_gdown_flag(command, "--no-cookies")
+        add_gdown_flag(command, "--continue")
+        if args.remaining_ok and gdown_supports_remaining_ok():
+            command.append("--remaining-ok")
+        elif args.remaining_ok:
+            print("Installed gdown does not support --remaining-ok; continuing without it.", flush=True)
+        try:
+            run_gdown(command)
+        except subprocess.CalledProcessError:
+            print("Folder download failed; falling back to essential MECO files.", flush=True)
+            download_essential_meco_files(args.output_dir)
 
     vad_archive_path = None
     if not args.skip_vad:
@@ -79,16 +105,41 @@ def ensure_vad_archive(path: Path, url: str, output_dir: Path) -> Path:
             return candidate
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    command = [sys.executable, "-m", "gdown"]
-    add_gdown_flag(command, "--fuzzy")
-    add_gdown_flag(command, "--no-cookies")
-    add_gdown_flag(command, "--continue")
-    command.extend([url, "-O", str(path)])
-    print("Downloading VAD archive:", " ".join(command), flush=True)
-    run_gdown(command)
+    download_single_file(url, path)
     if not path.exists():
         raise FileNotFoundError(f"gdown finished but VAD archive was not created: {path}")
     return path
+
+
+def download_essential_meco_files(output_dir: Path) -> None:
+    for file_id, relative_path in ESSENTIAL_MECO_FILES:
+        destination = output_dir / relative_path
+        if destination.exists():
+            print(f"Already exists, skip download: {destination}", flush=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        url = f"https://drive.google.com/uc?id={file_id}"
+        download_single_file(url, destination)
+
+
+def download_single_file(url: str, destination: Path) -> None:
+    try:
+        import gdown
+    except ImportError:
+        command = [sys.executable, "-m", "gdown"]
+        add_gdown_flag(command, "--no-cookies")
+        add_gdown_flag(command, "--continue")
+        command.extend([url, "-O", str(destination)])
+        run_gdown(command)
+        return
+
+    print(f"Downloading file: {url} -> {destination}", flush=True)
+    try:
+        downloaded = gdown.download(url, str(destination), quiet=False, fuzzy=True)
+    except TypeError:
+        downloaded = gdown.download(url, str(destination), quiet=False)
+    if not downloaded or not destination.exists():
+        raise FileNotFoundError(f"gdown finished but file was not created: {destination}")
 
 
 def vad_archive_candidates(path: Path, output_dir: Path) -> list[Path]:
