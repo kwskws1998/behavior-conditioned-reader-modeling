@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--question-materials-path", type=Path, default=None)
     parser.add_argument("--text-materials-path", type=Path, default=None)
     parser.add_argument("--gaze-feature-space", choices=["auto", "raw", "residual", "both"], default="auto")
+    parser.add_argument("--vad-features-path", type=Path, default=None)
     parser.add_argument("--trainer", choices=["original_lm", "linear_backup"], default="original_lm")
     parser.add_argument("--epochs", type=float, default=5.0)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -57,6 +58,8 @@ def main() -> None:
                 str(args.batch_size),
                 "--include-train",
             ]
+            if args.vad_features_path:
+                command.extend(["--vad-features-path", str(args.vad_features_path)])
             if args.use_cpu:
                 command.append("--use-cpu")
             print("Running:", " ".join(command), flush=True)
@@ -129,7 +132,7 @@ def discover_moe_run_dirs(run_root: Path) -> list[Path]:
         path
         for path in run_root.iterdir()
         if path.is_dir()
-        and (path.name.startswith("moe_seed") or path.name.startswith("moe_residual_seed"))
+        and re.match(r"(moe|moe\d+).+_seed\d+$", path.name)
         and (path / "best_model").exists()
         and (path / "data_summary.json").exists()
     )

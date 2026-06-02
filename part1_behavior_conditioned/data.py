@@ -24,6 +24,75 @@ BEHAVIOR_PROFILE_COLUMNS = [
     "firstrun.reg.out",
 ]
 
+FULL_GAZE_PROFILE_COLUMNS = [
+    "blink",
+    "skip",
+    "nrun",
+    "reread",
+    "nfix",
+    "refix",
+    "reg.in",
+    "reg.out",
+    "dur",
+    "firstrun.skip",
+    "firstrun.nfix",
+    "firstrun.refix",
+    "firstrun.reg.in",
+    "firstrun.reg.out",
+    "firstrun.dur",
+    "firstrun.gopast",
+    "firstrun.gopast.sel",
+    "firstfix.launch",
+    "firstfix.land",
+    "firstfix.cland",
+    "firstfix.dur",
+    "singlefix",
+    "singlefix.launch",
+    "singlefix.land",
+    "singlefix.cland",
+    "singlefix.dur",
+]
+
+VAD_WORD_TOKEN_FEATURE_COLUMNS = [
+    "vad_word_valence",
+    "vad_word_arousal",
+    "vad_word_dominance",
+    "vad_word_valence_centered",
+    "vad_word_arousal_centered",
+    "vad_word_dominance_centered",
+    "vad_word_affective_extremity",
+    "vad_word_affective_intensity",
+    "vad_word_covered",
+]
+
+VAD_SENTENCE_TOKEN_FEATURE_COLUMNS = [
+    "vad_sent_valence_mean",
+    "vad_sent_arousal_mean",
+    "vad_sent_dominance_mean",
+    "vad_sent_valence_centered_mean",
+    "vad_sent_arousal_centered_mean",
+    "vad_sent_dominance_centered_mean",
+    "vad_sent_affective_extremity_mean",
+    "vad_sent_affective_intensity_mean",
+    "vad_sent_arousal_max",
+    "vad_sent_valence_min",
+    "vad_sent_coverage_rate",
+]
+
+VAD_SENSITIVITY_OUTCOMES = {
+    "log_trt": "log_trt",
+    "nfix": "nfix",
+    "firstrun_log_dur": "firstrun_log_dur",
+    "reread": "reread",
+}
+
+VAD_SENSITIVITY_PREDICTORS = [
+    "vad_word_valence_centered",
+    "vad_word_arousal_centered",
+    "vad_word_dominance_centered",
+    "vad_word_affective_intensity_centered",
+]
+
 REQUIRED_COLUMNS = [
     "uniform_id",
     "trialid",
@@ -35,6 +104,16 @@ REQUIRED_COLUMNS = [
 ]
 
 BASELINE_KEY_COLUMNS = ["uniform_id", "trialid", "sentnum", "wordnum"]
+
+
+def token_feature_columns_for_set(token_feature_set: str) -> list[str]:
+    if token_feature_set == "none":
+        return []
+    if token_feature_set == "vad_word":
+        return list(VAD_WORD_TOKEN_FEATURE_COLUMNS)
+    if token_feature_set == "vad_word_sentence":
+        return [*VAD_WORD_TOKEN_FEATURE_COLUMNS, *VAD_SENTENCE_TOKEN_FEATURE_COLUMNS]
+    raise ValueError(f"Unknown token_feature_set: {token_feature_set}")
 
 
 @dataclass(frozen=True)
@@ -85,7 +164,47 @@ def load_meco_rda(path: str | Path, lang: str = "en") -> pd.DataFrame:
     for col in BEHAVIOR_PROFILE_COLUMNS:
         if col in data.columns:
             data[col] = pd.to_numeric(data[col], errors="coerce").fillna(0.0)
+    for col in FULL_GAZE_PROFILE_COLUMNS:
+        if col in data.columns and col not in BEHAVIOR_PROFILE_COLUMNS and col != "dur":
+            data[col] = pd.to_numeric(data[col], errors="coerce")
     return data.sort_values(["uniform_id", "trialid", "sentnum", "wordnum"]).reset_index(drop=True)
+
+
+def load_vad_features(path: str | Path) -> pd.DataFrame:
+    vad = pd.read_csv(path)
+    missing = set(BASELINE_KEY_COLUMNS).difference(vad.columns)
+    if missing:
+        raise ValueError(f"VAD features are missing required key columns: {sorted(missing)}")
+    vad = vad.copy()
+    vad["uniform_id"] = vad["uniform_id"].astype(str)
+    for col in ["trialid", "sentnum", "wordnum"]:
+        vad[col] = pd.to_numeric(vad[col], errors="coerce").astype("Int64")
+    vad = vad.dropna(subset=BASELINE_KEY_COLUMNS).copy()
+    for col in ["trialid", "sentnum", "wordnum"]:
+        vad[col] = vad[col].astype(int)
+
+    duplicated = vad.duplicated(BASELINE_KEY_COLUMNS, keep=False)
+    if duplicated.any():
+        examples = vad.loc[duplicated, BASELINE_KEY_COLUMNS].head(10).to_dict(orient="records")
+        raise ValueError(f"VAD feature file contains duplicated MECO keys. Examples: {examples}")
+
+    for col in vad.columns:
+        if col not in BASELINE_KEY_COLUMNS and col not in {"word", "word_norm"}:
+            vad[col] = pd.to_numeric(vad[col], errors="coerce")
+    return vad.sort_values(BASELINE_KEY_COLUMNS).reset_index(drop=True)
+
+
+def attach_vad_features(data: pd.DataFrame, vad_features: pd.DataFrame) -> pd.DataFrame:
+    data = data.copy()
+    vad_features = vad_features.drop(columns=["word", "word_norm"], errors="ignore")
+    overlap = [
+        col
+        for col in vad_features.columns
+        if col in data.columns and col not in BASELINE_KEY_COLUMNS and col not in {"word", "word_norm"}
+    ]
+    if overlap:
+        data = data.drop(columns=overlap)
+    return data.merge(vad_features, on=BASELINE_KEY_COLUMNS, how="left", validate="one_to_one")
 
 
 def ensure_log_trt_column(data: pd.DataFrame) -> pd.DataFrame:
@@ -184,18 +303,113 @@ def compute_behavior_profiles(
     data: pd.DataFrame,
     profile_trials: Iterable[int],
     feature_names: list[str] | None = None,
+    profile_feature_set: str = "behavior_only",
 ) -> pd.DataFrame:
-    feature_names = feature_names or [col for col in BEHAVIOR_PROFILE_COLUMNS if col in data.columns]
+    if feature_names is not None:
+        return _compute_mean_profiles(data, profile_trials=profile_trials, feature_names=feature_names)
+    if profile_feature_set == "behavior_only":
+        feature_names = [col for col in BEHAVIOR_PROFILE_COLUMNS if col in data.columns]
+        return _compute_mean_profiles(data, profile_trials=profile_trials, feature_names=feature_names)
+    if profile_feature_set == "full_gaze":
+        feature_names = [col for col in FULL_GAZE_PROFILE_COLUMNS if col in data.columns]
+        return _compute_summary_profiles(data, profile_trials=profile_trials, feature_names=feature_names)
+    if profile_feature_set == "full_gaze_vad":
+        feature_names = [col for col in FULL_GAZE_PROFILE_COLUMNS if col in data.columns]
+        profiles = _compute_summary_profiles(data, profile_trials=profile_trials, feature_names=feature_names)
+        vad_profiles = compute_vad_sensitivity_profiles(data, profile_trials=profile_trials)
+        return profiles.join(vad_profiles, how="left").fillna(0.0)
+    raise ValueError(f"Unknown profile_feature_set: {profile_feature_set}")
+
+
+def _compute_mean_profiles(
+    data: pd.DataFrame,
+    profile_trials: Iterable[int],
+    feature_names: list[str],
+) -> pd.DataFrame:
     if not feature_names:
-        raise ValueError("No behavior profile columns are available")
+        raise ValueError("No profile columns are available")
     profile_trials = set(parse_int_list(profile_trials))
     profile_data = data.loc[data["trialid"].isin(profile_trials)].copy()
     if profile_data.empty:
         raise ValueError(f"No rows found for profile trials: {sorted(profile_trials)}")
+    for col in feature_names:
+        profile_data[col] = pd.to_numeric(profile_data[col], errors="coerce")
     profiles = profile_data.groupby("uniform_id")[feature_names].mean()
     profiles = profiles.reindex(sorted(data["uniform_id"].unique()))
     profiles = profiles.fillna(profiles.mean()).fillna(0.0)
     return profiles.astype(float)
+
+
+def _compute_summary_profiles(
+    data: pd.DataFrame,
+    profile_trials: Iterable[int],
+    feature_names: list[str],
+) -> pd.DataFrame:
+    if not feature_names:
+        raise ValueError("No full gaze profile columns are available")
+    profile_trials = set(parse_int_list(profile_trials))
+    profile_data = data.loc[data["trialid"].isin(profile_trials)].copy()
+    if profile_data.empty:
+        raise ValueError(f"No rows found for profile trials: {sorted(profile_trials)}")
+    for col in feature_names:
+        profile_data[col] = pd.to_numeric(profile_data[col], errors="coerce")
+    grouped = profile_data.groupby("uniform_id")[feature_names]
+    mean = grouped.mean().add_suffix("_mean")
+    std = grouped.std().fillna(0.0).add_suffix("_std")
+    profiles = pd.concat([mean, std], axis=1)
+    profiles = profiles.reindex(sorted(data["uniform_id"].unique()))
+    profiles = profiles.fillna(profiles.mean()).fillna(0.0)
+    return profiles.astype(float)
+
+
+def compute_vad_sensitivity_profiles(
+    data: pd.DataFrame,
+    profile_trials: Iterable[int],
+) -> pd.DataFrame:
+    missing = [col for col in VAD_SENSITIVITY_PREDICTORS if col not in data.columns]
+    if missing:
+        raise ValueError(f"full_gaze_vad requires VAD predictor columns: {missing}")
+    data = ensure_log_trt_column(data)
+    data = data.copy()
+    firstrun_duration = (
+        pd.to_numeric(data["firstrun.dur"], errors="coerce")
+        if "firstrun.dur" in data.columns
+        else pd.Series(np.nan, index=data.index)
+    )
+    data["firstrun_log_dur"] = [
+        None if pd.isna(value) else float(np.log1p(value))
+        for value in firstrun_duration
+    ]
+    profile_trials = set(parse_int_list(profile_trials))
+    profile_data = data.loc[data["trialid"].isin(profile_trials)].copy()
+    rows = []
+    for reader, group in profile_data.groupby("uniform_id", sort=True):
+        row = {"uniform_id": str(reader)}
+        for outcome_name, outcome_col in VAD_SENSITIVITY_OUTCOMES.items():
+            slopes = _fit_reader_vad_slopes(group, outcome_col=outcome_col)
+            for predictor, slope in slopes.items():
+                clean_predictor = predictor.replace("vad_word_", "").replace("_centered", "")
+                row[f"vad_sensitivity_{outcome_name}_{clean_predictor}"] = float(slope)
+        rows.append(row)
+    profiles = pd.DataFrame(rows).set_index("uniform_id") if rows else pd.DataFrame()
+    profiles = profiles.reindex(sorted(data["uniform_id"].unique()))
+    profiles = profiles.fillna(profiles.mean()).fillna(0.0)
+    return profiles.astype(float)
+
+
+def _fit_reader_vad_slopes(group: pd.DataFrame, outcome_col: str) -> dict[str, float]:
+    needed = [outcome_col, *VAD_SENSITIVITY_PREDICTORS]
+    subset = group[needed].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if len(subset) < len(VAD_SENSITIVITY_PREDICTORS) + 2:
+        return {predictor: 0.0 for predictor in VAD_SENSITIVITY_PREDICTORS}
+    x = subset[VAD_SENSITIVITY_PREDICTORS].to_numpy(dtype=float)
+    y = subset[outcome_col].to_numpy(dtype=float)
+    x = np.column_stack([np.ones(len(x)), x])
+    try:
+        beta = np.linalg.lstsq(x, y, rcond=None)[0]
+    except np.linalg.LinAlgError:
+        return {predictor: 0.0 for predictor in VAD_SENSITIVITY_PREDICTORS}
+    return {predictor: float(value) for predictor, value in zip(VAD_SENSITIVITY_PREDICTORS, beta[1:])}
 
 
 def fit_profile_stats(profiles: pd.DataFrame, train_readers: Iterable[str]) -> ProfileStats:
@@ -219,6 +433,7 @@ def make_sentence_examples(
     profiles: dict[str, np.ndarray],
     profile_mode: str,
     label_column: str = "log_trt",
+    token_feature_columns: list[str] | None = None,
     seed: int = 13,
 ) -> list[dict[str, Any]]:
     readers = sorted(str(reader) for reader in readers)
@@ -254,6 +469,17 @@ def make_sentence_examples(
             example["raw_log_trt"] = _make_numeric_labels(sentence["log_trt"])
         if "baseline_pred_log_trt" in sentence.columns:
             example["baseline_log_trt"] = _make_numeric_labels(sentence["baseline_pred_log_trt"])
+        if token_feature_columns:
+            missing = [col for col in token_feature_columns if col not in sentence.columns]
+            if missing:
+                raise ValueError(f"Missing token feature columns: {missing}")
+            token_features = (
+                sentence[token_feature_columns]
+                .apply(pd.to_numeric, errors="coerce")
+                .fillna(0.0)
+                .to_numpy(dtype=np.float32)
+            )
+            example["token_features"] = token_features.astype(float).tolist()
         examples.append(example)
     return examples
 
@@ -281,9 +507,25 @@ def tokenize_and_align_examples(dataset: Dataset, tokenizer: Any, max_length: in
             aligned_labels.append(label_ids)
         tokenized["labels"] = aligned_labels
         tokenized["reader_profile"] = batch["reader_profile"]
+        if "token_features" in batch:
+            aligned_features = []
+            feature_dim = len(batch["token_features"][0][0]) if batch["token_features"] and batch["token_features"][0] else 0
+            zero_features = [0.0] * feature_dim
+            for batch_idx, word_features in enumerate(batch["token_features"]):
+                word_ids = tokenized.word_ids(batch_index=batch_idx)
+                previous_word_idx = None
+                feature_ids = []
+                for word_idx in word_ids:
+                    if word_idx is None or word_idx == previous_word_idx:
+                        feature_ids.append(zero_features)
+                    else:
+                        feature_ids.append(word_features[word_idx])
+                    previous_word_idx = word_idx
+                aligned_features.append(feature_ids)
+            tokenized["token_features"] = aligned_features
         return tokenized
 
-    remove_columns = [col for col in dataset.column_names if col not in {"reader_profile"}]
+    remove_columns = [col for col in dataset.column_names if col not in {"reader_profile", "token_features"}]
     return dataset.map(tokenize_batch, batched=True, remove_columns=remove_columns)
 
 
@@ -296,6 +538,8 @@ def build_part1_raw_datasets(
     seed: int,
     explicit_test_readers: Iterable[str] | None = None,
     label_column: str = "log_trt",
+    profile_feature_set: str = "behavior_only",
+    token_feature_columns: list[str] | None = None,
 ) -> Part1RawDatasets:
     if label_column == "log_trt" and "log_trt" not in data.columns:
         data = ensure_log_trt_column(data)
@@ -305,7 +549,7 @@ def build_part1_raw_datasets(
         seed=seed,
         explicit_test_readers=explicit_test_readers,
     )
-    raw_profiles = compute_behavior_profiles(data, profile_trials=profile_trials)
+    raw_profiles = compute_behavior_profiles(data, profile_trials=profile_trials, profile_feature_set=profile_feature_set)
     profile_stats = fit_profile_stats(raw_profiles, split.train_readers)
     profiles = normalize_profiles(raw_profiles, profile_stats)
 
@@ -316,6 +560,7 @@ def build_part1_raw_datasets(
         profiles=profiles,
         profile_mode="actual",
         label_column=label_column,
+        token_feature_columns=token_feature_columns,
         seed=seed,
     )
     train = Dataset.from_list(train_examples)
@@ -331,6 +576,7 @@ def build_part1_raw_datasets(
                 profiles=profiles,
                 profile_mode=mode,
                 label_column=label_column,
+                token_feature_columns=token_feature_columns,
                 seed=seed,
             )
         )
@@ -342,6 +588,7 @@ def build_part1_raw_datasets(
                 profiles=profiles,
                 profile_mode=mode,
                 label_column=label_column,
+                token_feature_columns=token_feature_columns,
                 seed=seed,
             )
         )

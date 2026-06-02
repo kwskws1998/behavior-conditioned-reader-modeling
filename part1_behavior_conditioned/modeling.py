@@ -19,6 +19,8 @@ class XLMRobertaForBehaviorConditionedTRT(XLMRobertaPreTrainedModel):
         self.conditioning_type = getattr(config, "conditioning_type", "concat")
         self.num_experts = int(getattr(config, "num_experts", 4))
         self.expert_hidden_size = int(getattr(config, "expert_hidden_size", config.hidden_size))
+        self.token_feature_dim = int(getattr(config, "token_feature_dim", 0))
+        self.regression_input_size = config.hidden_size + self.token_feature_dim
 
         self.roberta = XLMRobertaModel(config, add_pooling_layer=False)
         dropout_prob = config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
@@ -28,7 +30,7 @@ class XLMRobertaForBehaviorConditionedTRT(XLMRobertaPreTrainedModel):
             raise ValueError(f"Unknown conditioning_type: {self.conditioning_type}")
 
         if self.conditioning_type == "none":
-            self.regressor = nn.Linear(config.hidden_size, 1)
+            self.regressor = nn.Linear(self.regression_input_size, 1)
         else:
             self.profile_encoder = nn.Sequential(
                 nn.Linear(self.profile_dim, self.profile_hidden_size),
@@ -38,13 +40,13 @@ class XLMRobertaForBehaviorConditionedTRT(XLMRobertaPreTrainedModel):
                 nn.GELU(),
             )
             if self.conditioning_type == "concat":
-                self.regressor = nn.Linear(config.hidden_size + self.profile_hidden_size, 1)
+                self.regressor = nn.Linear(self.regression_input_size + self.profile_hidden_size, 1)
             else:
                 self.gate = nn.Linear(self.profile_hidden_size, self.num_experts)
                 self.experts = nn.ModuleList(
                     [
                         nn.Sequential(
-                            nn.Linear(config.hidden_size, self.expert_hidden_size),
+                            nn.Linear(self.regression_input_size, self.expert_hidden_size),
                             nn.GELU(),
                             nn.Dropout(dropout_prob),
                             nn.Linear(self.expert_hidden_size, 1),
@@ -65,6 +67,7 @@ class XLMRobertaForBehaviorConditionedTRT(XLMRobertaPreTrainedModel):
         inputs_embeds: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         reader_profile: Optional[torch.Tensor] = None,
+        token_features: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -83,7 +86,7 @@ class XLMRobertaForBehaviorConditionedTRT(XLMRobertaPreTrainedModel):
         )
 
         sequence_output = self.dropout(outputs[0])
-        logits = self._regress(sequence_output, reader_profile).squeeze(-1)
+        logits = self._regress(sequence_output, reader_profile, token_features).squeeze(-1)
         loss = None
         if labels is not None:
             active = torch.isfinite(labels) & (labels != -100.0)
@@ -99,7 +102,21 @@ class XLMRobertaForBehaviorConditionedTRT(XLMRobertaPreTrainedModel):
             attentions=outputs.attentions,
         )
 
-    def _regress(self, sequence_output: torch.Tensor, reader_profile: Optional[torch.Tensor]) -> torch.Tensor:
+    def _regress(
+        self,
+        sequence_output: torch.Tensor,
+        reader_profile: Optional[torch.Tensor],
+        token_features: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if self.token_feature_dim > 0:
+            if token_features is None:
+                token_features = sequence_output.new_zeros(
+                    sequence_output.shape[0],
+                    sequence_output.shape[1],
+                    self.token_feature_dim,
+                )
+            token_features = token_features.to(sequence_output.dtype)
+            sequence_output = torch.cat([sequence_output, token_features], dim=-1)
         if self.conditioning_type == "none":
             return self.regressor(sequence_output)
         if reader_profile is None:
@@ -113,4 +130,3 @@ class XLMRobertaForBehaviorConditionedTRT(XLMRobertaPreTrainedModel):
         gate_weights = torch.softmax(self.gate(profile_repr), dim=-1)
         expert_outputs = torch.stack([expert(sequence_output) for expert in self.experts], dim=-1)
         return (expert_outputs * gate_weights[:, None, None, :]).sum(dim=-1)
-

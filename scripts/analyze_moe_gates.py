@@ -18,7 +18,14 @@ from transformers import AutoConfig
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from part1_behavior_conditioned.data import compute_behavior_profiles, fit_profile_stats, load_meco_rda, normalize_profiles
+from part1_behavior_conditioned.data import (
+    attach_vad_features,
+    compute_behavior_profiles,
+    fit_profile_stats,
+    load_vad_features,
+    load_meco_rda,
+    normalize_profiles,
+)
 from part1_behavior_conditioned.modeling import XLMRobertaForBehaviorConditionedTRT
 
 
@@ -32,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rda-path", type=Path, default=Path("data") / "primary data" / "eye tracking data" / TARGET_RDA_NAME)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--lang", type=str, default="en")
+    parser.add_argument("--vad-features-path", type=Path, default=None)
     parser.add_argument("--use-cpu", action="store_true")
     return parser.parse_args()
 
@@ -59,7 +67,13 @@ def main() -> None:
         else:
             output_dir = args.output_dir or run_dir / "gate_analysis"
         output_dir.mkdir(parents=True, exist_ok=True)
-        result = analyze_run(run_dir=run_dir, data=data, output_dir=output_dir, device=device)
+        result = analyze_run(
+            run_dir=run_dir,
+            data=data,
+            output_dir=output_dir,
+            device=device,
+            vad_features_path=args.vad_features_path,
+        )
         all_gate_rows.append(result["gates"])
         all_corr_rows.append(result["correlations"])
         all_stability_rows.append(result["stability"])
@@ -94,8 +108,15 @@ def main() -> None:
         print(json.dumps(aggregate_report, indent=2))
 
 
-def analyze_run(run_dir: Path, data: pd.DataFrame, output_dir: Path, device: torch.device) -> dict[str, pd.DataFrame | None]:
+def analyze_run(
+    run_dir: Path,
+    data: pd.DataFrame,
+    output_dir: Path,
+    device: torch.device,
+    vad_features_path: Path | None,
+) -> dict[str, pd.DataFrame | None]:
     summary = json.loads((run_dir / "data_summary.json").read_text(encoding="utf-8"))
+    run_data = prepare_vad_data(data, summary, vad_features_path)
     model_dir = run_dir / "best_model"
     config = AutoConfig.from_pretrained(model_dir, local_files_only=True)
     if getattr(config, "conditioning_type", None) != "moe":
@@ -107,7 +128,11 @@ def analyze_run(run_dir: Path, data: pd.DataFrame, output_dir: Path, device: tor
     test_readers = summary["test_readers"]
     all_readers = sorted(train_readers + test_readers)
     profile_trials = summary.get("profile_trials", [1, 2])
-    raw_profiles = compute_behavior_profiles(data, profile_trials=profile_trials)
+    raw_profiles = compute_behavior_profiles(
+        run_data,
+        profile_trials=profile_trials,
+        profile_feature_set=summary.get("profile_feature_set", "behavior_only"),
+    )
     profile_stats = fit_profile_stats(raw_profiles, train_readers)
     normalized_profiles = normalize_profiles(raw_profiles, profile_stats)
     gates = compute_gate_dataframe(
@@ -125,8 +150,9 @@ def analyze_run(run_dir: Path, data: pd.DataFrame, output_dir: Path, device: tor
     expert_profiles = summarize_dominant_expert_behavior_profiles(gates, run_dir)
     stability = compute_gate_stability(
         model=model,
-        data=data,
+        data=run_data,
         profile_stats=profile_stats,
+        profile_feature_set=summary.get("profile_feature_set", "behavior_only"),
         readers=all_readers,
         train_readers=set(train_readers),
         device=device,
@@ -176,6 +202,18 @@ def analyze_run(run_dir: Path, data: pd.DataFrame, output_dir: Path, device: tor
         "gain_correlations": gain_correlations,
         "expert_gains": expert_gains,
     }
+
+
+def prepare_vad_data(data: pd.DataFrame, summary: dict, override_path: Path | None) -> pd.DataFrame:
+    token_feature_set = summary.get("token_feature_set", "none")
+    profile_feature_set = summary.get("profile_feature_set", "behavior_only")
+    needs_vad = token_feature_set != "none" or profile_feature_set == "full_gaze_vad"
+    if not needs_vad:
+        return data
+    vad_path = override_path or summary.get("vad_features_path")
+    if not vad_path:
+        raise ValueError(f"{summary.get('conditioning_type', 'run')} requires VAD features but no path was provided")
+    return attach_vad_features(data, load_vad_features(vad_path))
 
 
 def compute_gate_dataframe(
@@ -320,6 +358,7 @@ def compute_gate_stability(
     model: XLMRobertaForBehaviorConditionedTRT,
     data: pd.DataFrame,
     profile_stats,
+    profile_feature_set: str,
     readers: list[str],
     train_readers: set[str],
     device: torch.device,
@@ -327,7 +366,8 @@ def compute_gate_stability(
 ) -> pd.DataFrame:
     gates_by_label = {}
     for label, trials in [("trial1", [1]), ("trial2", [2]), ("trial1_2", [1, 2])]:
-        raw_profiles = compute_behavior_profiles(data, profile_trials=trials, feature_names=profile_stats.feature_names)
+        raw_profiles = compute_behavior_profiles(data, profile_trials=trials, profile_feature_set=profile_feature_set)
+        raw_profiles = raw_profiles.reindex(columns=profile_stats.feature_names).fillna(0.0)
         normalized = normalize_profiles(raw_profiles, profile_stats)
         gates_by_label[label] = compute_gates(model, [normalized[reader] for reader in readers], device=device)
 

@@ -23,11 +23,14 @@ from transformers import AutoConfig, AutoTokenizer, Trainer, TrainingArguments
 from part1_behavior_conditioned.collator import DataCollatorForBehaviorConditionedTokenRegression
 from part1_behavior_conditioned.data import (
     attach_residual_baseline,
+    attach_vad_features,
     build_part1_raw_datasets,
     ensure_log_trt_column,
+    load_vad_features,
     load_residual_baseline_predictions,
     load_meco_rda,
     parse_int_list,
+    token_feature_columns_for_set,
     tokenize_and_align_examples,
 )
 from part1_behavior_conditioned.metrics import compute_token_regression_metrics
@@ -57,6 +60,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conditioning-type", choices=["none", "concat", "moe"], default="concat")
     parser.add_argument("--target-mode", choices=["raw", "residual"], default="raw")
     parser.add_argument("--residual-baseline-dir", type=Path, default=None)
+    parser.add_argument("--vad-features-path", type=Path, default=None)
+    parser.add_argument("--token-feature-set", choices=["none", "vad_word", "vad_word_sentence"], default="none")
+    parser.add_argument("--profile-feature-set", choices=["behavior_only", "full_gaze", "full_gaze_vad"], default="behavior_only")
     parser.add_argument("--profile-hidden-size", type=int, default=64)
     parser.add_argument("--num-experts", type=int, default=4)
     parser.add_argument("--expert-hidden-size", type=int, default=256)
@@ -97,7 +103,9 @@ def main() -> None:
 
     args.rda_path = resolve_rda_path(args.rda_path)
     data = load_meco_rda(args.rda_path, lang=args.lang)
+    data = prepare_vad_data(args, data)
     data, label_column, target_summary = prepare_target_data(args, data)
+    token_feature_columns = token_feature_columns_for_set(args.token_feature_set)
     explicit_test_readers = [item.strip() for item in args.test_readers.split(",") if item.strip()] or None
     raw_datasets = build_part1_raw_datasets(
         data,
@@ -108,6 +116,8 @@ def main() -> None:
         seed=args.seed,
         explicit_test_readers=explicit_test_readers,
         label_column=label_column,
+        profile_feature_set=args.profile_feature_set,
+        token_feature_columns=token_feature_columns,
     )
     label_summary = summarize_raw_dataset_labels(raw_datasets)
     if args.target_mode == "residual":
@@ -123,6 +133,11 @@ def main() -> None:
         "dev_trials": parse_int_list(args.dev_trials),
         "seed": args.seed,
         "conditioning_type": args.conditioning_type,
+        "profile_feature_set": args.profile_feature_set,
+        "token_feature_set": args.token_feature_set,
+        "vad_features_path": str(args.vad_features_path) if args.vad_features_path else None,
+        "token_feature_names": token_feature_columns,
+        "token_feature_dim": len(token_feature_columns),
         "train_readers": raw_datasets.split.train_readers,
         "test_readers": raw_datasets.split.test_readers,
         "profile_features": raw_datasets.profile_stats.feature_names,
@@ -185,6 +200,8 @@ def main() -> None:
             "conditioning_type": args.conditioning_type,
             "num_experts": args.num_experts,
             "expert_hidden_size": args.expert_hidden_size,
+            "token_feature_dim": len(token_feature_columns),
+            "token_feature_names": token_feature_columns,
         }
     )
     model = XLMRobertaForBehaviorConditionedTRT.from_pretrained(
@@ -251,6 +268,16 @@ def main() -> None:
     print(json.dumps(all_metrics, indent=2))
 
 
+def prepare_vad_data(args: argparse.Namespace, data):
+    needs_vad = args.token_feature_set != "none" or args.profile_feature_set == "full_gaze_vad"
+    if not needs_vad:
+        return data
+    if args.vad_features_path is None:
+        raise ValueError("--vad-features-path is required for VAD token features or full_gaze_vad profiles")
+    vad_features = load_vad_features(args.vad_features_path)
+    return attach_vad_features(data, vad_features)
+
+
 def prepare_target_data(args: argparse.Namespace, data):
     data = ensure_log_trt_column(data)
     if args.target_mode == "raw":
@@ -281,8 +308,21 @@ def summarize_raw_dataset_labels(raw_datasets) -> dict[str, dict[str, float]]:
 def summarize_dataset_labels(dataset) -> dict[str, float]:
     values = []
     missing = 0
+    raw_observed = 0
+    raw_missing = 0
+    missing_baseline_for_observed_raw = 0
     for example in dataset:
-        for value in example["labels"]:
+        raw_values = example.get("raw_log_trt", [None] * len(example["labels"]))
+        baseline_values = example.get("baseline_log_trt", [0.0] * len(example["labels"]))
+        for value, raw_value, baseline_value in zip(example["labels"], raw_values, baseline_values):
+            raw_is_observed = raw_value is not None and np.isfinite(raw_value)
+            baseline_is_observed = baseline_value is not None and np.isfinite(baseline_value)
+            if raw_is_observed:
+                raw_observed += 1
+            else:
+                raw_missing += 1
+            if raw_is_observed and not baseline_is_observed:
+                missing_baseline_for_observed_raw += 1
             if value is None or not np.isfinite(value):
                 missing += 1
             else:
@@ -291,13 +331,20 @@ def summarize_dataset_labels(dataset) -> dict[str, float]:
     return {
         "n_observed": int(array.size),
         "n_missing": int(missing),
+        "n_raw_observed": int(raw_observed),
+        "n_raw_missing": int(raw_missing),
+        "n_missing_baseline_for_observed_raw": int(missing_baseline_for_observed_raw),
         "mean": float(array.mean()) if array.size else float("nan"),
         "std": float(array.std()) if array.size else float("nan"),
     }
 
 
 def validate_residual_labels(label_summary: dict[str, dict[str, float]]) -> None:
-    missing = {name: values["n_missing"] for name, values in label_summary.items() if values["n_missing"] > 0}
+    missing = {
+        name: values["n_missing_baseline_for_observed_raw"]
+        for name, values in label_summary.items()
+        if values["n_missing_baseline_for_observed_raw"] > 0
+    }
     if missing:
         raise ValueError(f"Residual labels are missing baseline predictions: {missing}")
     train_summary = label_summary.get("train_actual", {})

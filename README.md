@@ -138,6 +138,74 @@ python scripts/analyze_part1_residual_multiseed.py \
   --split test
 ```
 
+## VAD-Personalized Residual Runs
+
+Download the VAD archive, or let the feature builder download it automatically when missing:
+
+```bash
+python scripts/download_vad_dataset.py
+```
+
+Build English MECO VAD features from the labeled VAD archive:
+
+```bash
+python scripts/build_meco_vad_features.py \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --output-path artifacts/vad/meco_en_vad_features.csv
+```
+
+The primary word-level VAD join uses `nrc_vad.tsv`, `warriner_et_al.tsv`, and `scott_et_al.tsv`.
+`facebook_va.tsv` is kept in the archive but excluded from this primary VAD path because it has no dominance ratings.
+
+Smoke run:
+
+```bash
+python scripts/run_vad_residual_multiseed.py \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --vad-features-path artifacts/vad/meco_en_vad_features.csv \
+  --output-root artifacts/vad_residual_multiseed_smoke \
+  --conditioning-types concat moe \
+  --seeds 13 \
+  --num-experts 2 \
+  --epochs 1 \
+  --max-steps 20 \
+  --batch-size 8
+```
+
+Full run:
+
+```bash
+python scripts/run_vad_residual_multiseed.py \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --vad-features-path artifacts/vad/meco_en_vad_features.csv \
+  --output-root artifacts/vad_residual_multiseed \
+  --conditioning-types concat moe \
+  --seeds 13 21 42 87 100 \
+  --num-experts 2 \
+  --epochs 5 \
+  --batch-size 8 \
+  --allow-downloads
+```
+
+Analyze calibration-to-future VAD sensitivity and residual prediction gains:
+
+```bash
+python scripts/analyze_vad_sensitivity.py \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --vad-features-path artifacts/vad/meco_en_vad_features.csv \
+  --run-root artifacts/vad_residual_multiseed \
+  --split test
+```
+
+For MoE gate analysis on VAD full-profile runs:
+
+```bash
+python scripts/analyze_moe_gates.py \
+  --run-root artifacts/vad_residual_multiseed \
+  --rda-path "data/primary data/eye tracking data/joint_l1_data_trimmed_version1.3.rda" \
+  --vad-features-path artifacts/vad/meco_en_vad_features.csv
+```
+
 ## High-Variance Analysis
 
 After a run finishes, dump word-level predictions:

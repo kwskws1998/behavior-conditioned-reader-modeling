@@ -23,15 +23,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from part1_behavior_conditioned.collator import DataCollatorForBehaviorConditionedTokenRegression
 from part1_behavior_conditioned.data import (
     attach_residual_baseline,
+    attach_vad_features,
     build_part1_raw_datasets,
     compute_behavior_profiles,
     ensure_log_trt_column,
     fit_profile_stats,
+    load_vad_features,
     load_residual_baseline_predictions,
     load_meco_rda,
     make_sentence_examples,
     normalize_profiles,
     parse_int_list,
+    token_feature_columns_for_set,
     tokenize_and_align_examples,
 )
 from part1_behavior_conditioned.modeling import XLMRobertaForBehaviorConditionedTRT
@@ -47,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--lang", type=str, default="en")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--vad-features-path", type=Path, default=None)
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--include-train", action="store_true")
@@ -63,7 +67,9 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     data = load_meco_rda(args.rda_path, lang=args.lang)
+    data = prepare_vad_data(data, summary, args.vad_features_path)
     data, label_column = prepare_target_data(data, summary)
+    token_feature_columns = token_feature_columns_for_set(summary.get("token_feature_set", "none"))
     raw = build_part1_raw_datasets(
         data,
         profile_trials=summary.get("profile_trials", [1, 2]),
@@ -73,6 +79,8 @@ def main() -> None:
         seed=seed,
         explicit_test_readers=summary["test_readers"],
         label_column=label_column,
+        profile_feature_set=summary.get("profile_feature_set", "behavior_only"),
+        token_feature_columns=token_feature_columns,
     )
 
     model_dir = args.run_dir / "best_model"
@@ -133,6 +141,18 @@ def prepare_target_data(data: pd.DataFrame, summary: dict) -> tuple[pd.DataFrame
         raise ValueError("Residual run summary is missing residual_baseline_dir")
     baseline = load_residual_baseline_predictions(baseline_dir)
     return attach_residual_baseline(data, baseline), "residual_log_trt"
+
+
+def prepare_vad_data(data: pd.DataFrame, summary: dict, override_path: Path | None) -> pd.DataFrame:
+    token_feature_set = summary.get("token_feature_set", "none")
+    profile_feature_set = summary.get("profile_feature_set", "behavior_only")
+    needs_vad = token_feature_set != "none" or profile_feature_set == "full_gaze_vad"
+    if not needs_vad:
+        return data
+    vad_path = override_path or summary.get("vad_features_path")
+    if not vad_path:
+        raise ValueError("Run requires VAD features but no vad_features_path is recorded; pass --vad-features-path")
+    return attach_vad_features(data, load_vad_features(vad_path))
 
 
 def predict_logits(
@@ -229,7 +249,12 @@ def dump_word_predictions(
 
 
 def build_train_profile_datasets(data: pd.DataFrame, raw, summary: dict, seed: int, label_column: str) -> dict[str, Dataset]:
-    raw_profiles = compute_behavior_profiles(data, profile_trials=summary.get("profile_trials", [1, 2]))
+    token_feature_columns = token_feature_columns_for_set(summary.get("token_feature_set", "none"))
+    raw_profiles = compute_behavior_profiles(
+        data,
+        profile_trials=summary.get("profile_trials", [1, 2]),
+        profile_feature_set=summary.get("profile_feature_set", "behavior_only"),
+    )
     profile_stats = fit_profile_stats(raw_profiles, raw.split.train_readers)
     profiles = normalize_profiles(raw_profiles, profile_stats)
     train_trials = summary.get("train_trials", [3, 4, 5, 6, 7, 8, 9, 10])
@@ -242,6 +267,7 @@ def build_train_profile_datasets(data: pd.DataFrame, raw, summary: dict, seed: i
                 profiles=profiles,
                 profile_mode=mode,
                 label_column=label_column,
+                token_feature_columns=token_feature_columns,
                 seed=seed,
             )
         )
